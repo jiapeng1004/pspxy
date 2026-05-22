@@ -149,7 +149,7 @@ jobs:
   # -------------------- Tag：将客户端二进制发布到 GitHub Releases --------------------
   release-client-binaries:
     name: Publish client binaries to GitHub Releases
-    if: github.ref_type == 'tag'
+#    if: github.ref_type == 'tag'
     needs: client-binaries
     runs-on: ubuntu-latest
     permissions:
