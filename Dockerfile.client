@@ -1,17 +1,9 @@
-# 客户端运行时镜像（仅 alpine + 预编译二进制）。
-# 二进制须已内嵌 SPA；由 CI 在 Docker 前先构建 linux/amd64，再将 client 拷入构建上下文。
-#
-# CI 生成的目录示例（上下文根）：
-#   client                    # chmod +x 的 linux-amd64 可执行文件
-#   config-client.example.yaml
-#
-# docker build / 本地示例：
-#   mkdir -p bundle && cp build/tcp-proxy-client-linux-amd64 bundle/client && chmod +x bundle/client \\
-#     && cp config-client.example.yaml bundle/
-#   docker buildx build --platform linux/amd64 -f Dockerfile.client -t pspxy-client:local ./bundle
+# 客户端运行时镜像（仅 Alpine + CI 预编译的 linux-amd64 二进制）。
+# 构建上下文内需含：client、config-client.example.yaml。参见 DOCKER-CLIENT.md。
 
 FROM alpine:latest
-RUN apk --no-cache add ca-certificates tzdata
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories \
+  && apk --no-cache add ca-certificates tzdata
 ENV TZ=Asia/Shanghai
 WORKDIR /app
 COPY client /app/client

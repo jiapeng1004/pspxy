@@ -32,6 +32,9 @@ Thumbs.db
 *.log
 bin/
 build/
+# 本地 Docker 上下文（按需生成，勿入库）
+docker-server-bundle/
+docker-client-bundle/
 # 客户端本地隧道配置（可能含 secret_key）
 config-client.yaml
 

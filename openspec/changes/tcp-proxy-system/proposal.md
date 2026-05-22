@@ -20,7 +20,7 @@
 1. **后端服务（Server）**
    - Go + Gin 框架
    - YAML 配置存储，支持热重载
-   - Alpine Docker 镜像部署
+   - Alpine Docker 镜像部署（apk 使用阿里云镜像；服务端镜像仅在 CI Runner 编译后打包以利用缓存）
    - 内嵌 React 静态资源
 
 2. **前端界面（UI）**
