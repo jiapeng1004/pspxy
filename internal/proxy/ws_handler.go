@@ -25,6 +25,11 @@ func NewWSUpgrader() *WSUpgrader {
 	return &WSUpgrader{}
 }
 
+// UpgradeConn 将 HTTP 连接升级为 WebSocket（与 HandleUpgrade 共用同一 Upgrader）。
+func (u *WSUpgrader) UpgradeConn(w http.ResponseWriter, r *http.Request) (*websocket.Conn, error) {
+	return wsUpgrader.Upgrade(w, r, nil)
+}
+
 // HandleUpgrade 处理 WebSocket 升级请求
 // targetAddr: 目标 TCP 地址 (host:port)
 func (u *WSUpgrader) HandleUpgrade(w http.ResponseWriter, r *http.Request, targetAddr string) {

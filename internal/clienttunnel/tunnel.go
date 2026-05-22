@@ -231,17 +231,28 @@ var wsDialer = websocket.Dialer{
 }
 
 func dialWebSocket(cfg Config) (net.Conn, error) {
-	serverURL := NormalizeServerURLForWS(cfg.ServerURL)
 	proxyID := strings.TrimSpace(cfg.ProxyID)
+	raw, err := DialWebSocketPath(cfg.ServerURL, "/ws/"+proxyID, cfg.AccessKey, cfg.SecretKey)
+	if err != nil {
+		return nil, err
+	}
+	return &wsConnWrapper{conn: raw}, nil
+}
 
-	u, err := url.Parse(serverURL)
+// DialWebSocketPath 按绝对路径拨号服务端 WebSocket（含 AK/SK 查询参数），不做 net.Conn 包装。
+func DialWebSocketPath(serverURL, path string, accessKey, secretKey string) (*websocket.Conn, error) {
+	base := NormalizeServerURLForWS(serverURL)
+	u, err := url.Parse(base)
 	if err != nil {
 		return nil, fmt.Errorf("parse server url: %w", err)
 	}
-	u.Path = fmt.Sprintf("/ws/%s", proxyID)
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	u.Path = path
 
-	ak := strings.TrimSpace(cfg.AccessKey)
-	sk := strings.TrimSpace(cfg.SecretKey)
+	ak := strings.TrimSpace(accessKey)
+	sk := strings.TrimSpace(secretKey)
 	if ak != "" && sk != "" {
 		ts := strconv.FormatInt(time.Now().Unix(), 10)
 		sig := strings.ToLower(api.SignAccessPayload(ak, ts, sk))
@@ -252,11 +263,12 @@ func dialWebSocket(cfg Config) (net.Conn, error) {
 		u.RawQuery = q.Encode()
 	}
 
+	urlStr := u.String()
 	var lastErr error
 	for i := 0; i < 10; i++ {
-		conn, _, err := wsDialer.Dial(u.String(), nil)
+		conn, _, err := wsDialer.Dial(urlStr, nil)
 		if err == nil {
-			return &wsConnWrapper{conn: conn}, nil
+			return conn, nil
 		}
 		lastErr = err
 		wait := time.Duration(1<<uint(i)) * time.Second

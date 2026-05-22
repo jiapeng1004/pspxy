@@ -1,21 +1,25 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 	"pspxy/internal/config"
 	adminembed "pspxy/internal/embed/admin"
 	"pspxy/internal/proxy"
+	"pspxy/internal/reversetunnel"
 )
 
 // Handler API 处理器（手动依赖注入，无 Wire）
 type Handler struct {
 	proxyMgr *proxy.Manager
 	cfgMgr   *config.Manager
+	rt       *reversetunnel.Broker
 	startAt  time.Time
 }
 
@@ -24,6 +28,7 @@ func NewHandler(proxyMgr *proxy.Manager, cfgMgr *config.Manager) *Handler {
 	return &Handler{
 		proxyMgr: proxyMgr,
 		cfgMgr:   cfgMgr,
+		rt:       reversetunnel.NewBroker(),
 		startAt:  time.Now(),
 	}
 }
@@ -67,6 +72,32 @@ func (h *Handler) Run(port int) error {
 			return
 		}
 		h.WebSocketTunnel(c)
+	})
+
+	// 反向隧道：暴露端注册本地 TCP；另一客户端用 channel_id + 本地监听接入
+	r.GET("/ws/rtunnel/provider", func(c *gin.Context) {
+		authCfg := h.cfgMgr.GetConfig().Server.Auth
+		if err := VerifyAccessAuth(authCfg, c.Request); err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error":   "unauthorized",
+				"message": err.Error(),
+			})
+			c.Abort()
+			return
+		}
+		h.RTunnelProvider(c)
+	})
+	r.GET("/ws/rtunnel/session/:channel_id", func(c *gin.Context) {
+		authCfg := h.cfgMgr.GetConfig().Server.Auth
+		if err := VerifyAccessAuth(authCfg, c.Request); err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error":   "unauthorized",
+				"message": err.Error(),
+			})
+			c.Abort()
+			return
+		}
+		h.RTunnelConsumer(c)
 	})
 
 	// 静态文件服务（SPA 回退）
@@ -355,6 +386,63 @@ func (h *Handler) WebSocketTunnel(c *gin.Context) {
 	defer ts.DecrTunnel()
 
 	h.proxyMgr.GetWSUpgrader().HandleUpgrade(c.Writer, c.Request, pc.RemoteAddress)
+}
+
+// RTunnelProvider 反向隧道暴露端：首条 Text 为 Offer JSON，服务端返回 channel_id。
+func (h *Handler) RTunnelProvider(c *gin.Context) {
+	wsU := h.proxyMgr.GetWSUpgrader()
+	conn, err := wsU.UpgradeConn(c.Writer, c.Request)
+	if err != nil {
+		return
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	_, data, err := conn.ReadMessage()
+	_ = conn.SetReadDeadline(time.Time{})
+	if err != nil {
+		_ = conn.Close()
+		return
+	}
+	var offer reversetunnel.Offer
+	if err := json.Unmarshal(data, &offer); err != nil {
+		b, _ := json.Marshal(map[string]any{"ok": false, "error": "invalid offer json"})
+		_ = conn.WriteMessage(websocket.TextMessage, b)
+		_ = conn.Close()
+		return
+	}
+	chID, startReadLoop, err := h.rt.RegisterProvider(conn, offer)
+	if err != nil {
+		b, _ := json.Marshal(map[string]any{"ok": false, "error": err.Error()})
+		_ = conn.WriteMessage(websocket.TextMessage, b)
+		_ = conn.Close()
+		return
+	}
+	resp, _ := json.Marshal(map[string]any{"ok": true, "channel_id": chID.String()})
+	if err := conn.WriteMessage(websocket.TextMessage, resp); err != nil {
+		h.rt.AbortProviderRegistration(chID)
+		_ = conn.Close()
+		return
+	}
+	startReadLoop()
+	// Broker 读循环接管 conn（关闭时卸载 channel）
+}
+
+// RTunnelConsumer 反向隧道接入端：每个 WebSocket ↔ 暴露端一侧的一条本地 TCP（由 provider dial）。
+func (h *Handler) RTunnelConsumer(c *gin.Context) {
+	chStr := c.Param("channel_id")
+	chID, err := uuid.Parse(chStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "bad channel_id"})
+		return
+	}
+	wsU := h.proxyMgr.GetWSUpgrader()
+	conn, err := wsU.UpgradeConn(c.Writer, c.Request)
+	if err != nil {
+		return
+	}
+	if err := h.rt.AttachConsumer(chID, conn); err != nil {
+		// AttachConsumer 失败时已关闭 conn
+		return
+	}
 }
 
 // ServeStatic SPA 静态文件回退

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"pspxy/internal/clientconfig"
@@ -24,10 +25,34 @@ func main() {
 	uiListen := flag.String("ui-listen", ":9420", "Web UI 监听地址（仅 local-port 为 0 时有效）")
 	clientYAML := flag.String("client-config", "config-client.yaml", "客户端隧道持久化配置（YAML）；Web 启动隧道成功后会写入，进程下次启动会从该文件自动还原")
 
+	reverseProvider := flag.Bool("reverse-provider", false, "反向隧道：暴露本机 TCP（与 -reverse-local-port 等配合），服务端下发 channel UUID")
+	reverseConsumer := flag.Bool("reverse-consumer", false, "反向隧道：在本机监听 -reverse-listen，经 channel 接入暴露端服务")
+	rtLocalHost := flag.String("reverse-local-host", "127.0.0.1", "反向 provider：要暴露的本机主机")
+	rtLocalPort := flag.Int("reverse-local-port", 0, "反向 provider：要暴露的本机 TCP 端口")
+	rtListen := flag.String("reverse-listen", "", "反向 consumer：监听地址，例如 127.0.0.1:19090")
+	rtChannel := flag.String("reverse-channel-id", "", "反向 consumer：provider 下发的 channel UUID")
+	accessKey := flag.String("access-key", "", "服务端 AK（可选，与服务端配置的 Secret 配对）")
+	secretKey := flag.String("secret-key", "", "服务端 SK（可选）")
+
 	flag.Parse()
 
 	clientCfgPath := filepath.Clean(*clientYAML)
 	log.Printf("tcp-proxy-client %s", Version)
+
+	if *reverseConsumer {
+		if strings.TrimSpace(*rtChannel) == "" || strings.TrimSpace(*rtListen) == "" {
+			log.Fatal("反向 consumer 模式需要 -reverse-channel-id 与 -reverse-listen（如 127.0.0.1:19090）")
+		}
+		runReverseConsumerMain(*serverURL, *accessKey, *secretKey, *rtListen, *rtChannel)
+		return
+	}
+	if *reverseProvider {
+		if *rtLocalPort <= 0 {
+			log.Fatal("反向 provider 模式需要 -reverse-local-port（要暴露的本机端口）")
+		}
+		runReverseProviderMain(*serverURL, *accessKey, *secretKey, *rtLocalHost, *rtLocalPort)
+		return
+	}
 
 	if *localPort > 0 {
 		runHeadless(serverURL, proxyID, localPort, clientCfgPath)
@@ -69,4 +94,19 @@ func runHeadless(serverURL *string, proxyID *string, localPort *int, clientCfgPa
 	<-quit
 
 	reg.StopAll()
+}
+
+func runReverseProviderMain(serverURL, ak, sk, rtHost string, rtPort int) {
+	id, err := clienttunnel.RunReverseProvider(serverURL, rtHost, rtPort, ak, sk)
+	if err != nil {
+		log.Printf("反向 provider 结束 (channel=%s): %v", id, err)
+	} else {
+		log.Printf("反向 provider 已退出 (channel=%s)", id)
+	}
+}
+
+func runReverseConsumerMain(serverURL, ak, sk, listenAddr, channelID string) {
+	if err := clienttunnel.RunReverseConsumer(listenAddr, serverURL, channelID, ak, sk); err != nil {
+		log.Fatal(err)
+	}
 }

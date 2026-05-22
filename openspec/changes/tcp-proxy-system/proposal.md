@@ -10,7 +10,7 @@
 - 将本地 TCP 服务安全地暴露到公网
 - 支持多种传输协议（WebSocket、HTTP CONNECT）
 - 提供直观的 Web 管理界面
-- 支持多平台客户端分发
+- 支持 Windows / Linux x64 客户端分发及 Linux 容器镜像（缩短 CI 构建面）
 - 配置动态更新，无需重启服务
 
 ## Proposed Solution
@@ -26,7 +26,7 @@
 2. **前端界面（UI）**
    - React 单页应用
    - 编译产物嵌入 Go 二进制文件
-   - 支持多平台构建（Windows/macOS/Linux）
+   - 支持客户端 Windows / Linux x64 二进制与 Linux amd64 Docker 镜像分发
 
 3. **代理功能**
    - TCP 端口监听

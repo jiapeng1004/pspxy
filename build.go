@@ -20,8 +20,6 @@ type Target struct {
 
 var clientTargets = []Target{
 	{Name: "tcp-proxy-client-windows-amd64", GOOS: "windows", GOARCH: "amd64", Ext: ".exe"},
-	{Name: "tcp-proxy-client-darwin-amd64", GOOS: "darwin", GOARCH: "amd64", Ext: ""},
-	{Name: "tcp-proxy-client-darwin-arm64", GOOS: "darwin", GOARCH: "arm64", Ext: ""},
 	{Name: "tcp-proxy-client-linux-amd64", GOOS: "linux", GOARCH: "amd64", Ext: ""},
 }
 

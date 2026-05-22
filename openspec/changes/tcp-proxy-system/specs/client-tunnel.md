@@ -48,13 +48,12 @@
 - **AND** 通知用户（如系统托盘提示）
 
 ### Requirement: Multi-Platform Binary
-客户端 SHALL 提供多平台独立二进制文件。
+客户端 SHALL 在 CI/发布流程中提供约定的独立二进制及 Linux 容器镜像。
 
 #### Scenario: 平台支持
-- **WHEN** 构建客户端
-- **THEN** 生成以下平台的二进制文件：
-  - Windows x86_64 (`tcp-proxy-client-windows-amd64.exe`)
-  - macOS x86_64 (`tcp-proxy-client-darwin-amd64`)
-  - macOS ARM64 (`tcp-proxy-client-darwin-arm64`)
-  - Linux x86_64 (`tcp-proxy-client-linux-amd64`)
-- **AND** 每个二进制文件内嵌 React 前端资源
+- **WHEN** 构建客户端（CI 或 `go run build.go clients`）
+- **THEN** 生成以下产物：
+  - Windows x86_64（`tcp-proxy-client-windows-amd64.exe`）
+  - Linux x86_64（`tcp-proxy-client-linux-amd64`）
+  - Linux amd64 Docker 镜像（`Dockerfile.client`，由 CI 使用预编译 `linux-amd64` 打包）
+- **AND** 每个二进制文件内嵌同一套 React（web-client）静态资源
