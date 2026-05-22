@@ -1,0 +1,14 @@
+version: 1
+proxies:
+    - id: default
+      server_url: 127.0.0.1:3000
+      proxy_id: 6b61a6c8-3d38-45b6-88eb-0adc9357e9a6
+      local_port: 10801
+      access_key: ak_dxpklym
+      secret_key: sk_efghjcvhjghnm
+    - id: db1349e9-3030-4ac3-9d7d-01640291fbfb
+      server_url: 127.0.0.1:3000
+      proxy_id: 3ddc1361-d552-4d8b-ae91-89f31649ff79
+      local_port: 10808
+      access_key: ak_dxpklym
+      secret_key: sk_efghjcvhjghnm

@@ -1,0 +1,38 @@
+schema: spec-driven
+
+# 项目级上下文：创建 proposal / specs / design / tasks 时注入 AI
+context: |
+  Pixiu：类 Figma 的个人设计协作系统。
+  后端：Go (Kratos)、MySQL 8、Redis。
+  前端：Vite + TypeScript。
+
+  ## 数据模型硬性约束
+  - 所有业务表名 MUST 使用 `pixiu_` 前缀（例 `pixiu_users`、`pixiu_organizations`）。
+  - 所有业务表主键 MUST 使用 UUID v7 字符串（RFC 9562），禁止 BIGINT 自增主键。
+  - 主键列名统一为 `id`；逻辑外键列名 `{实体}_id`（如 `user_id`、`organization_id`）。
+  - MySQL 列类型：`CHAR(36) NOT NULL`，存储小写、带连字符的标准形式（例 `018f5c20-8b3a-7b2e-9c4d-123456789abc`）。
+  - UUID 在应用层生成（推荐 Go：`github.com/google/uuid` 或 `github.com/gofrs/uuid` 的 v7）；数据库不使用 `AUTO_INCREMENT`。
+  - 禁止使用物理外键（`FOREIGN KEY` / `REFERENCES`）；引用完整性在应用层保证，关联列须建普通索引。
+  - 关联表若仅有复合主键且无独立实体语义，可省略 `id`，但所有引用其他表的逻辑外键仍须为 `CHAR(36)` UUID v7。
+
+  ## SQL 脚本命名（详见 openspec/specs/sql-migrations）
+  - 基线：`backend/sql/init_<版本>.sql`（新库一次性执行）
+  - 补丁：`backend/sql/patch_<版本>_<简述>.sql`（旧库按版本顺序升级）
+  - 禁止用 `init_0.0.2.sql` 等形式表示增量；`init_` 仅用于基线
+
+# 按制品类型的补充规则
+rules:
+  proposal:
+    - 涉及持久化时，在 Impact 中说明是否新增/修改表，并确认主键符合 UUID v7 约束
+    - 若涉及 DDL 文件，说明使用 init 还是 patch，并引用 `sql-migrations`
+  specs:
+    - 数据模型相关需求必须引用 `database-primary-key` 能力或重复其 SHALL 条款
+    - 涉及 schema 迁移的需求须引用 `sql-migrations` 或重复其 init/patch 命名 SHALL 条款
+  design:
+    - 表名一律 `pixiu_` 前缀；主键与逻辑外键列一律 `CHAR(36)`，并注明 UUID v7 生成位置（服务层 / 工具函数）
+    - DDL 禁止 `FOREIGN KEY`；逻辑外键列须声明 `KEY` 索引
+    - 禁止在 design 中采用雪花 ID、ULID（除非经 OpenSpec 变更显式修订本约束）、BIGINT 自增
+    - DDL 脚本命名：`init_<版本>.sql` 仅基线；增量 MUST 为 `patch_<版本>_<简述>.sql`，路径 `backend/sql/`
+  tasks:
+    - 建表 / 迁移任务须包含「主键为 UUID v7 字符串」验收项
+    - 迁移任务须标明 init 或 patch 文件名，并符合 `sql-migrations` 命名约定

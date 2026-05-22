@@ -1,0 +1,15 @@
+proxies:
+    - id: 3ddc1361-d552-4d8b-ae91-89f31649ff79
+      name: mysql
+      remote_address: 127.0.0.1:3306
+      enabled: true
+    - id: 6b61a6c8-3d38-45b6-88eb-0adc9357e9a6
+      name: redis
+      remote_address: 127.0.0.1:6379
+      enabled: true
+server:
+    port: 3000
+    static_dir: ./frontend/web-admin
+    auth:
+        access_key: ak_dxpklym
+        secret_key: sk_efghjcvhjghnm
