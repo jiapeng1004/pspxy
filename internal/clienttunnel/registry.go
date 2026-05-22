@@ -45,8 +45,9 @@ func NewProxyID() string {
 
 // PublicFromConfig 状态展示用（不含密钥明文）。
 func PublicFromConfig(c Config) PublicLastConfig {
+	su := NormalizeServerURLForWS(strings.TrimSpace(c.ServerURL))
 	return PublicLastConfig{
-		ServerURL: strings.TrimSpace(c.ServerURL),
+		ServerURL: su,
 		ProxyID:   strings.TrimSpace(c.ProxyID),
 		LocalPort: c.LocalPort,
 		AccessAuthConfigured: strings.TrimSpace(c.AccessKey) != "" &&
@@ -55,7 +56,7 @@ func PublicFromConfig(c Config) PublicLastConfig {
 }
 
 func (r *Registry) trimCopy(c Config) Config {
-	c.ServerURL = strings.TrimSpace(c.ServerURL)
+	c.ServerURL = NormalizeServerURLForWS(strings.TrimSpace(c.ServerURL))
 	c.ProxyID = strings.TrimSpace(c.ProxyID)
 	c.AccessKey = strings.TrimSpace(c.AccessKey)
 	c.SecretKey = strings.TrimSpace(c.SecretKey)
@@ -187,10 +188,7 @@ func (r *Registry) Snapshot() MultiStatus {
 	rows := make([]ProxyRow, 0, len(r.items))
 	for id, it := range r.items {
 		snap := it.tun.Snapshot()
-		pub := snap.LastConfig
-		if strings.TrimSpace(pub.ProxyID) == "" {
-			pub = PublicFromConfig(it.cfg)
-		}
+		pub := PublicFromConfig(it.cfg)
 		rows = append(rows, ProxyRow{
 			ID:                id,
 			Running:           snap.Running,

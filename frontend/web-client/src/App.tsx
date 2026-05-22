@@ -29,7 +29,7 @@ import {
   stopProxy,
   removeProxy,
 } from './api/tunnel';
-import { fetchRemoteAuthRequired, resolveServerHttpOrigin } from './api/server-auth';
+import { fetchRemoteAuthRequired, canonicalWebSocketServerUrl, resolveServerHttpOrigin } from './api/server-auth';
 import { clearTunnelCreds, loadTunnelCreds, saveTunnelCreds } from './api/tunnelCredSession';
 
 type AuthProbe =
@@ -37,6 +37,13 @@ type AuthProbe =
   | { status: 'loading'; target: string }
   | { status: 'ok'; target: string; authRequired: boolean }
   | { status: 'error'; target: string; reason: string };
+
+type PendingModalFill =
+  | { kind: 'edit'; row: ProxyRow }
+  | {
+      kind: 'new';
+      presets: TunnelConfig & { access_key?: string; secret_key?: string };
+    };
 
 function applyPersistHints(s: MultiTunnelStatus) {
   if (s.persist_warning) {
@@ -52,14 +59,26 @@ function axiosErrorMessage(e: unknown): string {
   return String(err.response?.data?.error || err.message || e);
 }
 
+/** 表单里的地址是否与本次探测所用的 target 等价（兼容裸 host / 前缀差异）。 */
+function urlsMatchProbeTarget(formUrl: string, probeTarget: string): boolean {
+  const a = formUrl.trim();
+  const b = probeTarget.trim();
+  if (!a || !b) return false;
+  if (a === b) return true;
+  return canonicalWebSocketServerUrl(a) === canonicalWebSocketServerUrl(b);
+}
+
 export default function App() {
   const [status, setStatus] = useState<MultiTunnelStatus | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
+  const [pendingFillTick, setPendingFillTick] = useState(0);
   const [editingNew, setEditingNew] = useState(false);
   const [modalBusy, setModalBusy] = useState(false);
   const [form] = Form.useForm<TunnelConfig & { access_key?: string; secret_key?: string }>();
   const [probe, setProbe] = useState<AuthProbe>({ status: 'idle' });
   const probeSeq = useRef(0);
+  const pendingModalRef = useRef<PendingModalFill | null>(null);
+  const modalFillGen = useRef(0);
 
   const watchedUrl = Form.useWatch('server_url', form);
 
@@ -73,7 +92,7 @@ export default function App() {
       setProbe({
         status: 'error',
         target: trimmed,
-        reason: '无法解析为有效的 ws(s):// 或 http(s)://',
+        reason: '无法解析为有效的 ws(s)://、http(s):// 或 主机:端口',
       });
       return;
     }
@@ -116,58 +135,89 @@ export default function App() {
   }, [poll]);
 
   const watchedTrim = typeof watchedUrl === 'string' ? watchedUrl.trim() : '';
-  const needMandatoryAuth =
-    probe.status === 'ok' && probe.target === watchedTrim && probe.authRequired;
-  const showOptionalAuth = probe.status === 'error' && probe.target === watchedTrim;
+  const probeTargetTrim =
+    probe.status !== 'idle' ? String(probe.target ?? '').trim() : '';
+  const probeMatchesForm =
+    !!watchedTrim && !!probeTargetTrim && urlsMatchProbeTarget(watchedTrim, probeTargetTrim);
+  /** 远端已确认要 AK/SK 时一律展示凭证行，避免仅靠「表单值与 probe 字符串完全一致」才渲染。 */
+  const credFieldsMandatory = probe.status === 'ok' && probe.authRequired;
+  const showCredInputs =
+    modalOpen &&
+    (credFieldsMandatory ||
+      (probe.status === 'error' && !!(watchedTrim || probeTargetTrim)));
+  const bannerUrlTrim = watchedTrim || probeTargetTrim;
   const authReady =
-    !!watchedTrim &&
-    (probe.status === 'ok' || probe.status === 'error') &&
-    probe.target === watchedTrim;
-  const authUnsettled = !!watchedTrim && !authReady;
-  const authChecking = probe.status === 'loading' && watchedTrim === probe.target;
+    probeMatchesForm &&
+    (probe.status === 'ok' || probe.status === 'error');
+  const authUnsettled = !!watchedTrim && probe.status !== 'loading' && !authReady;
+  const authChecking = probe.status === 'loading' && probeMatchesForm;
 
   const closeModal = () => {
+    modalFillGen.current += 1;
+    pendingModalRef.current = null;
     setModalOpen(false);
     setEditingNew(false);
   };
 
   const openAdd = () => {
     setEditingNew(true);
-    const nid = crypto.randomUUID();
-    form.resetFields();
-    form.setFieldsValue({
-      id: nid,
-      server_url: 'ws://127.0.0.1:3000',
-      proxy_id: '',
-      local_port: 10808,
-      access_key: '',
-      secret_key: '',
-    });
-    setProbe({ status: 'idle' });
+    pendingModalRef.current = {
+      kind: 'new',
+      presets: {
+        id: crypto.randomUUID(),
+        server_url: 'ws://127.0.0.1:3000',
+        proxy_id: '',
+        local_port: 10808,
+        access_key: '',
+        secret_key: '',
+      },
+    };
     setModalOpen(true);
-    window.setTimeout(
-      () => void runProbe(String(form.getFieldValue('server_url') ?? '').trim()),
-      0
-    );
+    setPendingFillTick((x) => x + 1);
   };
 
   const openEdit = (row: ProxyRow) => {
     setEditingNew(false);
-    const su = row.last_config.server_url;
-    const cred = loadTunnelCreds(su);
-    form.resetFields();
-    form.setFieldsValue({
-      id: row.id,
-      server_url: su,
-      proxy_id: row.last_config.proxy_id,
-      local_port: row.last_config.local_port,
-      access_key: cred?.access_key ?? '',
-      secret_key: cred?.secret_key ?? '',
-    });
-    setProbe({ status: 'idle' });
+    pendingModalRef.current = { kind: 'edit', row };
     setModalOpen(true);
-    window.setTimeout(() => void runProbe(su.trim()), 0);
+    setPendingFillTick((x) => x + 1);
   };
+
+  /** 表单挂载需在 Modal commit 之后，用 effect + tick 回填比 afterOpenChange 更稳定。 */
+  useEffect(() => {
+    if (!modalOpen) return;
+    const p = pendingModalRef.current;
+    if (!p) return;
+    const gen = modalFillGen.current;
+    const t = window.setTimeout(() => {
+      if (gen !== modalFillGen.current) return;
+      if (p.kind === 'edit') {
+        const row = p.row;
+        const rawSu = row.last_config?.server_url ?? '';
+        const canonSu = canonicalWebSocketServerUrl(rawSu);
+        const displaySu = (canonSu || rawSu || '').trim();
+        const cred = loadTunnelCreds(rawSu) ?? loadTunnelCreds(displaySu || rawSu);
+        form.resetFields();
+        form.setFieldsValue({
+          id: row.id,
+          server_url: displaySu || undefined,
+          proxy_id: row.last_config.proxy_id,
+          local_port: row.last_config.local_port,
+          access_key: cred?.access_key ?? '',
+          secret_key: cred?.secret_key ?? '',
+        });
+        setProbe({ status: 'idle' });
+        if (displaySu) void runProbe(displaySu);
+      } else {
+        form.resetFields();
+        form.setFieldsValue(p.presets);
+        setProbe({ status: 'idle' });
+        void runProbe(String(p.presets.server_url ?? '').trim());
+      }
+      pendingModalRef.current = null;
+    }, 0);
+    return () => window.clearTimeout(t);
+  }, [modalOpen, pendingFillTick, form, runProbe]);
 
   const onModalOk = async () => {
     if (authUnsettled || authChecking) {
@@ -181,7 +231,7 @@ export default function App() {
       let sk = (v.secret_key ?? '').trim();
 
       const mandatoryAuth =
-        probe.status === 'ok' && probe.authRequired && probe.target === srv;
+        probe.status === 'ok' && probe.authRequired && urlsMatchProbeTarget(srv, probe.target);
       if (mandatoryAuth) {
         if (!ak || !sk) {
           message.error('该服务端已启用鉴权，请填写 AK/SK');
@@ -323,7 +373,7 @@ export default function App() {
   ];
 
   const probeAlert = useMemo(() => {
-    if (!modalOpen || !watchedTrim) return null;
+    if (!modalOpen || !bannerUrlTrim) return null;
     switch (probe.status) {
       case 'loading':
         return <Alert type="info" message="正在检测远端鉴权…" showIcon />;
@@ -350,7 +400,7 @@ export default function App() {
       default:
         return null;
     }
-  }, [modalOpen, watchedTrim, probe]);
+  }, [modalOpen, bannerUrlTrim, probe]);
 
   return (
     <div style={{ maxWidth: 1100, margin: '24px auto', padding: '0 16px' }}>
@@ -388,6 +438,7 @@ export default function App() {
       <Modal
         title={editingNew ? '添加代理' : '配置代理'}
         open={modalOpen}
+        forceRender
         onCancel={closeModal}
         onOk={() => void onModalOk()}
         confirmLoading={modalBusy}
@@ -397,17 +448,20 @@ export default function App() {
         <Space direction="vertical" style={{ width: '100%', marginBottom: 12 }}>
           {probeAlert}
         </Space>
-        <Form form={form} layout="vertical" preserve={false}>
+        <Form form={form} layout="vertical">
           <Form.Item name="id" hidden>
             <Input />
           </Form.Item>
-          <Form.Item
-            label="服务端 WebSocket 基址"
-            name="server_url"
-            rules={[{ required: true, message: '例如 ws://host:3000' }]}
-          >
+          {/* Space.Compact 不能作为绑定字段的直接子结点，否则会收走 value/onChange 却不下传到 Input */}
+          <Form.Item label="服务端 WebSocket 基址">
             <Space.Compact style={{ width: '100%' }}>
-              <Input style={{ flex: 1 }} placeholder="ws://192.168.1.10:3000" />
+              <Form.Item
+                name="server_url"
+                noStyle
+                rules={[{ required: true, message: '例如 ws://host:3000' }]}
+              >
+                <Input style={{ flex: 1 }} placeholder="ws://192.168.1.10:3000" />
+              </Form.Item>
               <Button
                 type="default"
                 onClick={() => void runProbe(String(form.getFieldValue('server_url') ?? '').trim())}
@@ -430,22 +484,22 @@ export default function App() {
           >
             <InputNumber style={{ width: '100%' }} />
           </Form.Item>
-          {(needMandatoryAuth || showOptionalAuth) && watchedTrim ? (
+          {showCredInputs ? (
             <>
               <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 8 }}>
-                {needMandatoryAuth ? '访问凭证（仅存 sessionStorage）' : '可选：远端若开鉴权则填写'}
+                {credFieldsMandatory ? '访问凭证（仅存 sessionStorage）' : '可选：远端若开鉴权则填写'}
               </Typography.Text>
               <Form.Item
                 label="Access Key"
                 name="access_key"
-                rules={needMandatoryAuth ? [{ required: true, message: '必填' }] : undefined}
+                rules={credFieldsMandatory ? [{ required: true, message: '必填' }] : undefined}
               >
                 <Input autoComplete="off" />
               </Form.Item>
               <Form.Item
                 label="Secret Key"
                 name="secret_key"
-                rules={needMandatoryAuth ? [{ required: true, message: '必填' }] : undefined}
+                rules={credFieldsMandatory ? [{ required: true, message: '必填' }] : undefined}
               >
                 <Input.Password autoComplete="new-password" />
               </Form.Item>

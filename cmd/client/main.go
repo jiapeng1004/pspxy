@@ -14,6 +14,9 @@ import (
 	"pspxy/internal/clientui"
 )
 
+// Version 由构建脚本 / CI 通过 -ldflags "-X main.Version=..." 注入。
+var Version = "dev"
+
 func main() {
 	serverURL := flag.String("server", "ws://localhost:3000", "服务端 WebSocket 基址（如 ws://host:port，隧道路径会自动拼为 /ws/:proxy-id）")
 	proxyID := flag.String("proxy-id", "", "代理 ID（与服务端配置的 id 一致，对应路径 /ws/<id>）")
@@ -24,6 +27,7 @@ func main() {
 	flag.Parse()
 
 	clientCfgPath := filepath.Clean(*clientYAML)
+	log.Printf("tcp-proxy-client %s", Version)
 
 	if *localPort > 0 {
 		runHeadless(serverURL, proxyID, localPort, clientCfgPath)

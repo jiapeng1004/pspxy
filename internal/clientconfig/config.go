@@ -117,7 +117,7 @@ func SaveProxies(path string, proxies []clienttunnel.Config) error {
 }
 
 func trimCfg(c clienttunnel.Config) clienttunnel.Config {
-	c.ServerURL = strings.TrimSpace(c.ServerURL)
+	c.ServerURL = clienttunnel.NormalizeServerURLForWS(strings.TrimSpace(c.ServerURL))
 	c.ProxyID = strings.TrimSpace(c.ProxyID)
 	c.AccessKey = strings.TrimSpace(c.AccessKey)
 	c.SecretKey = strings.TrimSpace(c.SecretKey)

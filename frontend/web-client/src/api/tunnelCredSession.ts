@@ -1,6 +1,9 @@
 /** 仅存 sessionStorage（关闭标签页失效），并按服务端 HTTP Origin 分区，不把 AK/SK 写入 localStorage */
 
-import { resolveServerHttpOrigin } from './server-auth';
+import {
+  resolveServerHttpOrigin,
+  canonicalWebSocketServerUrl,
+} from './server-auth';
 
 export interface TunnelStoredCreds {
   access_key: string;
@@ -9,30 +12,43 @@ export interface TunnelStoredCreds {
 
 const PREFIX = 'pspxy_tunnel_sess:v1';
 
-function storageKey(serverBase: string): string | null {
-  const origin = resolveServerHttpOrigin(serverBase);
-  return origin ? `${PREFIX}:${origin}` : null;
+function candidateStorageKeys(serverBase: string): string[] {
+  const t = serverBase.trim();
+  if (!t) return [];
+  const variants = new Set<string>([t, canonicalWebSocketServerUrl(t)]);
+  const keys: string[] = [];
+  for (const v of variants) {
+    const origin = resolveServerHttpOrigin(v);
+    if (origin) keys.push(`${PREFIX}:${origin}`);
+  }
+  return keys;
 }
 
 export function loadTunnelCreds(serverBase: string): TunnelStoredCreds | null {
-  const key = storageKey(serverBase);
-  if (!key) return null;
-  try {
-    const raw = sessionStorage.getItem(key);
-    if (!raw) return null;
-    const o = JSON.parse(raw) as Record<string, unknown>;
-    const ak = typeof o.access_key === 'string' ? o.access_key : '';
-    const sk = typeof o.secret_key === 'string' ? o.secret_key : '';
-    if (!ak || !sk) return null;
-    return { access_key: ak, secret_key: sk };
-  } catch {
-    return null;
+  for (const key of candidateStorageKeys(serverBase)) {
+    try {
+      const raw = sessionStorage.getItem(key);
+      if (!raw) continue;
+      const o = JSON.parse(raw) as Record<string, unknown>;
+      const ak = typeof o.access_key === 'string' ? o.access_key : '';
+      const sk = typeof o.secret_key === 'string' ? o.secret_key : '';
+      if (!ak || !sk) continue;
+      return { access_key: ak, secret_key: sk };
+    } catch {
+      /* try next */
+    }
   }
+  return null;
 }
 
+/** 始终以规范 ws 地址对应的 Origin 保存，并清理该地址的旧键位 */
 export function saveTunnelCreds(serverBase: string, accessKey: string, secretKey: string): void {
-  const key = storageKey(serverBase);
-  if (!key) return;
+  clearTunnelCreds(serverBase);
+  const canon = canonicalWebSocketServerUrl(serverBase);
+  const origin = resolveServerHttpOrigin(canon);
+  if (!origin) return;
+
+  const key = `${PREFIX}:${origin}`;
   const ak = accessKey.trim();
   const sk = secretKey.trim();
   if (!ak || !sk) {
@@ -43,6 +59,7 @@ export function saveTunnelCreds(serverBase: string, accessKey: string, secretKey
 }
 
 export function clearTunnelCreds(serverBase: string): void {
-  const key = storageKey(serverBase);
-  if (key) sessionStorage.removeItem(key);
+  for (const key of candidateStorageKeys(serverBase)) {
+    sessionStorage.removeItem(key);
+  }
 }

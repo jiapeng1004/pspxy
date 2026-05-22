@@ -29,16 +29,37 @@ type Config struct {
 }
 
 func (c Config) validate() error {
-	if c.ServerURL == "" {
+	if strings.TrimSpace(c.ServerURL) == "" {
 		return errors.New("server_url 必填")
 	}
-	if c.ProxyID == "" {
+	if strings.TrimSpace(c.ProxyID) == "" {
 		return errors.New("proxy_id 必填")
 	}
 	if c.LocalPort < 1 || c.LocalPort > 65535 {
 		return errors.New("local_port 必须在 1-65535 之间")
 	}
 	return nil
+}
+
+// NormalizeServerURLForWS 将 bare host:port / http(s):// 规范为可被 url.Parse / websocket.Dial 使用的 ws(s)://。
+func NormalizeServerURLForWS(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	lower := strings.ToLower(s)
+	switch {
+	case strings.HasPrefix(lower, "http://"):
+		return "ws://" + s[len("http://"):]
+	case strings.HasPrefix(lower, "https://"):
+		return "wss://" + s[len("https://"):]
+	case strings.HasPrefix(lower, "ws://") || strings.HasPrefix(lower, "wss://"):
+		return s
+	}
+	if !strings.Contains(s, "://") {
+		return "ws://" + s
+	}
+	return s
 }
 
 // PublicLastConfig 返回给前端的状态快照（不包含密钥）。
@@ -110,7 +131,7 @@ func (t *Tunnel) Start(cfg Config) error {
 }
 
 func trimSchemeHost(raw string) string {
-	u, err := url.Parse(raw)
+	u, err := url.Parse(NormalizeServerURLForWS(raw))
 	if err != nil || u.Host == "" {
 		return raw
 	}
@@ -210,7 +231,7 @@ var wsDialer = websocket.Dialer{
 }
 
 func dialWebSocket(cfg Config) (net.Conn, error) {
-	serverURL := strings.TrimSpace(cfg.ServerURL)
+	serverURL := NormalizeServerURLForWS(cfg.ServerURL)
 	proxyID := strings.TrimSpace(cfg.ProxyID)
 
 	u, err := url.Parse(serverURL)

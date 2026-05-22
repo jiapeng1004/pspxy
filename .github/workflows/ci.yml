@@ -11,10 +11,38 @@ env:
   GOPROXY: https://goproxy.cn,direct
 
 jobs:
-  # Job 1: 构建并推送 Docker 镜像 → 阿里云 ACR
-  # 需在仓库 Secrets 配置：ALIYUN_ACR_USERNAME、ALIYUN_ACR_PASSWORD
-  docker:
-    name: Build and Push Docker Image
+  # -------------------- 并行：管理端镜像 vs 客户端 React --------------------
+  build-web-client:
+    name: Build web-client (React)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/web-client/package-lock.json
+
+      - name: Build client SPA
+        working-directory: frontend/web-client
+        run: |
+          npm config set registry https://registry.npmmirror.com
+          npm ci
+          npm run build
+
+      - name: Upload web-client dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-client-dist
+          path: frontend/web-client/dist
+          retention-days: 14
+
+  # Job: 构建并推送管理端镜像（Dockerfile 内自管 admin 前端 + Go）
+  docker-server:
+    name: Build and push server image
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -23,8 +51,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # 分支推送（如 develop）：仅打 latest
-      # 打 tag：打 latest + 该 tag 名（如 v1.0.0）
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@v5
@@ -43,19 +69,22 @@ jobs:
           username: ${{ secrets.ALIYUN_ACR_USERNAME }}
           password: ${{ secrets.ALIYUN_ACR_PASSWORD }}
 
-      - name: Build and push Docker image
+      - name: Build and push server image
         uses: docker/build-push-action@v5
         with:
           context: .
+          file: Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
-  # Job 2: 多平台二进制构建
-  binaries:
-    name: Build Multi-Platform Binaries
+  # -------------------- 依赖 web-client-dist：多端客户端二进制并行构建 --------------------
+  client-binaries:
+    name: Build client binary (${{ matrix.name }})
+    needs: build-web-client
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
           - name: windows-amd64
@@ -79,28 +108,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - name: Download web-client dist
+        uses: actions/download-artifact@v4
         with:
-          go-version: '1.21'
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Build client SPA (web-client)
-        run: |
-          cd frontend/web-client
-          npm config set registry https://registry.npmmirror.com
-          npm install
-          npm run build
+          name: web-client-dist
+          path: tmp-web-client-dist
 
       - name: Sync embedded client SPA
         run: |
           rm -rf internal/embed/client/dist
           mkdir -p internal/embed/client/dist
-          cp -r frontend/web-client/dist/* internal/embed/client/dist/
+          cp -r tmp-web-client-dist/. internal/embed/client/dist/
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
 
       - name: Set version
         id: version
@@ -118,10 +142,95 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           mkdir -p build
-          go build -ldflags="-s -w -X main.Version=${{ steps.version.outputs.version }}" -o build/tcp-proxy-client-${{ matrix.name }}${{ matrix.ext }} ./cmd/client
+          go build \
+            -ldflags="-s -w -X main.Version=${{ steps.version.outputs.version }}" \
+            -o "build/tcp-proxy-client-${{ matrix.name }}${{ matrix.ext }}" \
+            ./cmd/client
 
-      - name: Upload artifact
+      - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: tcp-proxy-client-${{ matrix.name }}
           path: build/tcp-proxy-client-${{ matrix.name }}${{ matrix.ext }}
+          retention-days: 30
+
+  # -------------------- Tag：将客户端二进制发布到 GitHub Releases --------------------
+  release-client-binaries:
+    name: Publish client binaries to GitHub Releases
+    if: github.ref_type == 'tag'
+    needs: client-binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all client binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: tcp-proxy-client-*
+          path: release-binaries
+          merge-multiple: true
+
+      - name: Create GitHub Release with assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          working_directory: release-binaries
+          files: |
+            tcp-proxy-client-*
+
+  docker-client:
+    name: Build and push client image
+    needs: client-binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Download linux-amd64 client binary
+        uses: actions/download-artifact@v4
+        with:
+          name: tcp-proxy-client-linux-amd64
+          path: docker-client-bundle
+
+      - name: Prepare image context
+        run: |
+          set -e
+          mkdir -p tmp-bundle
+          mv docker-client-bundle/tcp-proxy-client-linux-amd64 tmp-bundle/client
+          chmod +x tmp-bundle/client
+          cp config-client.example.yaml tmp-bundle/
+          rm -rf docker-client-bundle
+          mv tmp-bundle docker-client-bundle
+
+      - name: Docker meta (client)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: registry.cn-hangzhou.aliyuncs.com/jp-java/pspxy-client
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,value=latest
+            type=ref,event=tag,enable=${{ github.ref_type == 'tag' }}
+
+      - name: Login to Aliyun Container Registry (Hangzhou)
+        uses: docker/login-action@v3
+        with:
+          registry: registry.cn-hangzhou.aliyuncs.com
+          username: ${{ secrets.ALIYUN_ACR_USERNAME }}
+          password: ${{ secrets.ALIYUN_ACR_PASSWORD }}
+
+      - name: Build and push client image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./docker-client-bundle
+          file: ./Dockerfile.client
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
