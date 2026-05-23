@@ -79,7 +79,7 @@
   - [x] `GET /api/v1/health` - 健康检查
 
 - [x] 4.4 实现 WebSocket 端点
-  - [x] `WS /ws/:proxy_id` - WebSocket 隧道
+  - [x] `GET /ws/:tunnel_id` - 统一 ingress（登记 Proxy TCP 后端 或 Reverse Consumer UUID）
 
 - [x] 4.5 参数验证与错误处理
   - [x] 端口范围验证

@@ -1,4 +1,4 @@
-/** 与服务端 SignAccessPayload 一致：hex(SHA1(ak + "\n" + unixSec + "\n" + sk))，十六进制小写 */
+/** 与服务端 SignAccessPayload 一致：hex(SHA1(accessKey.trim()+'\n'+unixSec.trim()+'\n'+secretKey.trim()))；单列密钥时 accessKey===secretKey。 */
 
 export async function signAccessPayload(
   accessKey: string,

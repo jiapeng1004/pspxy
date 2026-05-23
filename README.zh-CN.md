@@ -2,7 +2,7 @@
 
 **语言：** [English README](README.md) | 中文
 
-基于 **WebSocket** 的 **TCP 桥接**：**[服务端](cmd/server)**（API、入口与会话中继）内置 **[管理端 SPA](frontend/web-admin)**；**[客户端](cmd/client)** 支持 **命令行 / 内置 Web UI**，可将 **本地 TCP** 映射到服务端配置的远端地址，或使用 **反向隧道** 暴露本机服务，其他机器通过服务端下发的 **`channel_id`** 接入。
+基于 **WebSocket** 的 **TCP 桥接**：**[服务端](cmd/server)**（API、入口与会话中继）内置 **[管理端 SPA](frontend/web-admin)**；**[客户端](cmd/client)** 支持 **命令行 / 内置 Web UI**，可将 **本地 TCP** 映射到服务端配置的远端地址，或使用 **反向隧道**（出站 Provider + 下发的 **`channel_id`**）；接入侧与正向一致，经统一的 **`GET /ws/:tunnel_id`**（`tunnel_id` 可为管理端注册的代理 id **或** 上述 **channel UUID**）。
 
 CI 自动构建二进制与精简 Alpine 镜像；Dockerfile 中 **Alpine apk 使用阿里云镜像源**。
 
@@ -12,8 +12,8 @@ CI 自动构建二进制与精简 Alpine 镜像；Dockerfile 中 **Alpine apk �
 
 | 能力 | 说明 |
 |------|------|
-| **正向隧道** | 客户端在本机 `127.0.0.1:<端口>` 监听；每个 TCP 连接经 `GET /ws/:proxy_id` 连到服务端，服务端 **主动拨号** 管理端配置的 `remote_address`。 |
-| **反向隧道** | **`/ws/rtunnel/provider`** 注册暴露端（首帧 JSON），服务端返回 **`channel_id`**（UUID）；接入端对每个本地入站 TCP 再起 **`/ws/rtunnel/session/:channel_id`**，经服务端 Broker **多路复用**转发到暴露端所连的本机 TCP。 |
+| **正向隧道** | 客户端本机监听；每条 TCP 经 **`GET /ws/:tunnel_id`** 连到服务端，其中 **`tunnel_id` 为管理端注册的代理 id**，服务端对该 id **直连配置的 `remote_address`**（服务端可达时使用）。 |
+| **反向隧道** | **出站 Port Provider**：`GET /ws/rtunnel/provider`，服务端下发 **`channel_id`**。**Consumer** 与正向「连隧道 id」语义一致：`GET /ws/:tunnel_id` 且 **`tunnel_id`** 为该 UUID；仍可兼容旧路径 **`/ws/rtunnel/session/:channel_id`**（仅走 Reverse Broker、不查 Proxy）。 |
 | **管理界面** | 管理端 SPA 嵌入服务端镜像/二进制（代理 CRUD、健康检查、YAML 热重载等）。 |
 | **客户端界面** | 客户端 SPA 嵌入二进制（多条隧道、`proxies` 持久化、可选 AK/SK 仅存 **`sessionStorage`**）。 |
 | **鉴权** | 服务端可选 **AK/SK** 签名（REST + WebSocket；浏览器可用 Query 传参）。 |
@@ -120,7 +120,7 @@ sequenceDiagram
     participant Up as 上游 TCP<br/>(remote_address)
 
     App->>CT: TCP 连接 127.0.0.1:local_port
-    CT->>SRV: WebSocket GET /ws/:proxy_id
+    CT->>SRV: WebSocket GET /ws/:tunnel_id
     SRV->>Up: TCP 连接 remote_address
     loop 数据
       App<<->>CT: TCP 负载
@@ -141,7 +141,7 @@ sequenceDiagram
 
     PV->>SRV: WS /ws/rtunnel/provider（offer JSON）
     SRV-->>PV: channel_id (uuid)
-    CS->>SRV: WS /ws/rtunnel/session/:channel_id（每入站 TCP 一条 WS）
+    CS->>SRV: WS GET /ws/:channel_id（每入站 TCP 一条 WS；亦可兼容 `/ws/rtunnel/session/:channel_id`）
     SRV->>PV: TEXT attach sid
     PV->>PV: Dial 本机端口
     PV-->>SRV: TEXT attached OK

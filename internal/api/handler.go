@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -42,11 +43,11 @@ func (h *Handler) Run(port int) error {
 	// 错误恢复中间件
 	r.Use(gin.Recovery())
 
-	// 公开：AK/SK 探测与登录校验（不参与签名校验中间件）
+	// 公开：鉴权探测与明文登录校验（不参与签名校验中间件）
 	r.GET("/api/v1/auth/enabled", h.AuthEnabled)
 	r.POST("/api/v1/auth/login", h.AuthLogin)
 
-	// 需鉴权的 REST（未配置 AK/SK 时中间件直接放行）
+	// 需鉴权的 REST（未配置鉴权时中间件直接放行）
 	v1 := r.Group("/api/v1")
 	v1.Use(GinAccessAuthMiddleware(h.cfgMgr))
 	{
@@ -60,8 +61,11 @@ func (h *Handler) Run(port int) error {
 		v1.GET("/health", h.HealthCheck)
 	}
 
-	// WebSocket 隧道：浏览器无法自定义 Header 时可使用 Query（psp_ak/psp_ts/psp_sig）
-	r.GET("/ws/:proxy_id", func(c *gin.Context) {
+	// WebSocket 统一入口：`GET /ws/:tunnel_id`
+	// — 若为管理端登记且启用的 Proxy，服务端直连 remote_address；
+	// — 否则若为合法 UUID 且存在活跃 Reverse Channel，则为 Consumer 附着（与正向 Consumer 语义一致）。
+	// 遗留路径 `GET /ws/rtunnel/session/:channel_id` 仍可用，仅从 Reverse Broker 附着（不进行 Proxy 分流）。
+	r.GET("/ws/:tunnel_id", func(c *gin.Context) {
 		authCfg := h.cfgMgr.GetConfig().Server.Auth
 		if err := VerifyAccessAuth(authCfg, c.Request); err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{
@@ -71,10 +75,10 @@ func (h *Handler) Run(port int) error {
 			c.Abort()
 			return
 		}
-		h.WebSocketTunnel(c)
+		h.TunnelIngress(c)
 	})
 
-	// 反向隧道：暴露端注册本地 TCP；另一客户端用 channel_id + 本地监听接入
+	// 反向隧道 Port Provider：`/ws/rtunnel/provider`（Consumer 推荐使用统一 ingress `/ws/:tunnel_id`，见 TunnelIngress）。
 	r.GET("/ws/rtunnel/provider", func(c *gin.Context) {
 		authCfg := h.cfgMgr.GetConfig().Server.Auth
 		if err := VerifyAccessAuth(authCfg, c.Request); err != nil {
@@ -121,13 +125,13 @@ func corsMiddleware() gin.HandlerFunc {
 	}
 }
 
-// AuthEnabled 返回是否配置了 AK/SK（无需鉴权）。
+// AuthEnabled 返回是否已启用鉴权（无需鉴权）。
 func (h *Handler) AuthEnabled(c *gin.Context) {
 	auth := h.cfgMgr.GetConfig().Server.Auth
 	c.JSON(http.StatusOK, gin.H{"auth_required": auth.Enabled()})
 }
 
-// AuthLogin 校验提交的 AK/SK 是否与服务端配置一致（无需事先签名）。未启用服务端鉴权时直接返回 ok。
+// AuthLogin 明文校验提交的 api_key。未启用鉴权时直接返回 ok。
 func (h *Handler) AuthLogin(c *gin.Context) {
 	auth := h.cfgMgr.GetConfig().Server.Auth
 	if !auth.Enabled() {
@@ -139,18 +143,17 @@ func (h *Handler) AuthLogin(c *gin.Context) {
 	}
 
 	var req struct {
-		AccessKey string `json:"access_key" binding:"required"`
-		SecretKey string `json:"secret_key" binding:"required"`
+		APIKey string `json:"api_key"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "bad_request",
-			"message": "请提交 access_key 与 secret_key",
+			"message": "无效的 JSON",
 		})
 		return
 	}
 
-	if err := VerifyPlainLoginCredentials(auth, req.AccessKey, req.SecretKey); err != nil {
+	if err := VerifyPlainCredential(auth, req.APIKey); err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"error":   "unauthorized",
 			"message": err.Error(),
@@ -353,42 +356,98 @@ func (h *Handler) HealthCheck(c *gin.Context) {
 
 // ========== 隧道端点 ==========
 
-// WebSocketTunnel WebSocket 隧道：`GET /ws/:proxy_id`，与 REST API 共享服务端端口。
-func (h *Handler) WebSocketTunnel(c *gin.Context) {
-	proxyID := c.Param("proxy_id")
+// TunnelIngress 统一入口 `GET /ws/:tunnel_id`：
+// — 若为管理端登记且启用的 Proxy，服务端直连 remote_address（TCP Provider）
+// — 否则若为 UUID 且在 Reverse Broker 中活跃，按 Consumer 附着（出站 Provider + Broker 中继）
+//
+// （若管理与动态通道碰巧使用同一 UUID，优先 Proxy 语义。）
+func (h *Handler) TunnelIngress(c *gin.Context) {
+	tunnelID := strings.TrimSpace(c.Param("tunnel_id"))
+	if tunnelID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "bad_request",
+			"message": "missing tunnel id",
+		})
+		return
+	}
 
-	ts, err := h.proxyMgr.GetTunnelServer(proxyID)
-	if err != nil {
+	ts, perr := h.proxyMgr.GetTunnelServer(tunnelID)
+	if perr == nil {
+		pc := ts.Config()
+		if !pc.Enabled {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":   "disabled",
+				"message": "proxy is disabled",
+			})
+			return
+		}
+		if !ts.IsRunning() {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error":   "unavailable",
+				"message": "proxy is not accepting tunnels",
+			})
+			return
+		}
+		ts.IncrTunnel()
+		defer ts.DecrTunnel()
+		h.proxyMgr.GetWSUpgrader().HandleUpgrade(c.Writer, c.Request, pc.RemoteAddress)
+		return
+	}
+
+	chID, uerr := uuid.Parse(tunnelID)
+	if uerr != nil || chID == uuid.Nil {
 		c.JSON(http.StatusNotFound, gin.H{
 			"error":   "not_found",
-			"message": err.Error(),
+			"message": "tunnel not registered",
 		})
 		return
 	}
-
-	pc := ts.Config()
-	if !pc.Enabled {
-		c.JSON(http.StatusForbidden, gin.H{
-			"error":   "disabled",
-			"message": "proxy is disabled",
+	if !h.rt.ChannelActive(chID) {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error":   "not_found",
+			"message": "tunnel not registered or provider offline",
 		})
 		return
 	}
-	if !ts.IsRunning() {
-		c.JSON(http.StatusServiceUnavailable, gin.H{
-			"error":   "unavailable",
-			"message": "proxy is not accepting tunnels",
-		})
+	wsU := h.proxyMgr.GetWSUpgrader()
+	conn, err := wsU.UpgradeConn(c.Writer, c.Request)
+	if err != nil {
 		return
 	}
-
-	ts.IncrTunnel()
-	defer ts.DecrTunnel()
-
-	h.proxyMgr.GetWSUpgrader().HandleUpgrade(c.Writer, c.Request, pc.RemoteAddress)
+	if err := h.rt.AttachConsumer(chID, conn); err != nil {
+		return
+	}
 }
 
-// RTunnelProvider 反向隧道暴露端：首条 Text 为 Offer JSON，服务端返回 channel_id。
+// RTunnelConsumer 遗留路径：`GET /ws/rtunnel/session/:channel_id` — 仅从 Reverse Broker 附着，不尝试 Proxy 分流。
+func (h *Handler) RTunnelConsumer(c *gin.Context) {
+	chStr := strings.TrimSpace(c.Param("channel_id"))
+	chID, err := uuid.Parse(chStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "bad_request",
+			"message": "invalid channel_id",
+		})
+		return
+	}
+	if !h.rt.ChannelActive(chID) {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error":   "not_found",
+			"message": "tunnel not registered or provider offline",
+		})
+		return
+	}
+	wsU := h.proxyMgr.GetWSUpgrader()
+	conn, err := wsU.UpgradeConn(c.Writer, c.Request)
+	if err != nil {
+		return
+	}
+	if err := h.rt.AttachConsumer(chID, conn); err != nil {
+		return
+	}
+}
+
+// RTunnelProvider 反向隧道暴露端：首条 Text 为 Offer JSON（可含可选 channel_id 以 reclaim）；服务端返回确认 channel_id。
 func (h *Handler) RTunnelProvider(c *gin.Context) {
 	wsU := h.proxyMgr.GetWSUpgrader()
 	conn, err := wsU.UpgradeConn(c.Writer, c.Request)
@@ -424,25 +483,6 @@ func (h *Handler) RTunnelProvider(c *gin.Context) {
 	}
 	startReadLoop()
 	// Broker 读循环接管 conn（关闭时卸载 channel）
-}
-
-// RTunnelConsumer 反向隧道接入端：每个 WebSocket ↔ 暴露端一侧的一条本地 TCP（由 provider dial）。
-func (h *Handler) RTunnelConsumer(c *gin.Context) {
-	chStr := c.Param("channel_id")
-	chID, err := uuid.Parse(chStr)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "bad channel_id"})
-		return
-	}
-	wsU := h.proxyMgr.GetWSUpgrader()
-	conn, err := wsU.UpgradeConn(c.Writer, c.Request)
-	if err != nil {
-		return
-	}
-	if err := h.rt.AttachConsumer(chID, conn); err != nil {
-		// AttachConsumer 失败时已关闭 conn
-		return
-	}
 }
 
 // ServeStatic SPA 静态文件回退

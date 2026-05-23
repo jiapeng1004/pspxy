@@ -18,14 +18,13 @@ import (
 	"pspxy/internal/api"
 )
 
-// Config 客户端隧道运行时参数（服务端单端口，`/ws/:proxy_id` 路由后端）
+// Config 客户端隧道运行时参数（服务端单端口：`GET /ws/:tunnel_id`，此处 proxy_id 即隧道 id）
 type Config struct {
 	ID        string `json:"id,omitempty" yaml:"id,omitempty"`
 	ServerURL string `json:"server_url" yaml:"server_url"`
 	ProxyID   string `json:"proxy_id" yaml:"proxy_id"`
 	LocalPort int    `json:"local_port" yaml:"local_port"`
-	AccessKey string `json:"access_key,omitempty" yaml:"access_key,omitempty"`
-	SecretKey string `json:"secret_key,omitempty" yaml:"secret_key,omitempty"`
+	APIKey    string `json:"api_key,omitempty" yaml:"api_key,omitempty"`
 }
 
 func (c Config) validate() error {
@@ -39,6 +38,11 @@ func (c Config) validate() error {
 		return errors.New("local_port 必须在 1-65535 之间")
 	}
 	return nil
+}
+
+// AuthSecretsConfigured 判断是否配置了单列 api_key（与服务端任选片段一致）。
+func AuthSecretsConfigured(apiKey string) bool {
+	return strings.TrimSpace(apiKey) != ""
 }
 
 // NormalizeServerURLForWS 将 bare host:port / http(s):// 规范为可被 url.Parse / websocket.Dial 使用的 ws(s)://。
@@ -186,11 +190,10 @@ func (t *Tunnel) Snapshot() Status {
 
 	st := Status{
 		LastConfig: PublicLastConfig{
-			ServerURL: strings.TrimSpace(raw.ServerURL),
-			ProxyID:   strings.TrimSpace(raw.ProxyID),
-			LocalPort: raw.LocalPort,
-			AccessAuthConfigured: strings.TrimSpace(raw.AccessKey) != "" &&
-				strings.TrimSpace(raw.SecretKey) != "",
+			ServerURL:            strings.TrimSpace(raw.ServerURL),
+			ProxyID:              strings.TrimSpace(raw.ProxyID),
+			LocalPort:            raw.LocalPort,
+			AccessAuthConfigured: AuthSecretsConfigured(raw.APIKey),
 		},
 		ActiveConnections: t.activeConns.Load(),
 		Error:             errStr,
@@ -232,15 +235,15 @@ var wsDialer = websocket.Dialer{
 
 func dialWebSocket(cfg Config) (net.Conn, error) {
 	proxyID := strings.TrimSpace(cfg.ProxyID)
-	raw, err := DialWebSocketPath(cfg.ServerURL, "/ws/"+proxyID, cfg.AccessKey, cfg.SecretKey)
+	raw, err := DialWebSocketPath(cfg.ServerURL, "/ws/"+proxyID, cfg.APIKey)
 	if err != nil {
 		return nil, err
 	}
 	return &wsConnWrapper{conn: raw}, nil
 }
 
-// DialWebSocketPath 按绝对路径拨号服务端 WebSocket（含 AK/SK 查询参数），不做 net.Conn 包装。
-func DialWebSocketPath(serverURL, path string, accessKey, secretKey string) (*websocket.Conn, error) {
+// DialWebSocketPath 拨号服务端 WebSocket。apiKey 非空时在 Query 带上 psp_ak/psp_ts/psp_sig（单列 k,k 签名）。
+func DialWebSocketPath(serverURL, path, apiKey string) (*websocket.Conn, error) {
 	base := NormalizeServerURLForWS(serverURL)
 	u, err := url.Parse(base)
 	if err != nil {
@@ -251,11 +254,10 @@ func DialWebSocketPath(serverURL, path string, accessKey, secretKey string) (*we
 	}
 	u.Path = path
 
-	ak := strings.TrimSpace(accessKey)
-	sk := strings.TrimSpace(secretKey)
-	if ak != "" && sk != "" {
+	ak := strings.TrimSpace(apiKey)
+	if ak != "" {
 		ts := strconv.FormatInt(time.Now().Unix(), 10)
-		sig := strings.ToLower(api.SignAccessPayload(ak, ts, sk))
+		sig := strings.ToLower(api.SignAccessPayload(ak, ts, ak))
 		q := u.Query()
 		q.Set("psp_ak", ak)
 		q.Set("psp_ts", ts)
@@ -266,11 +268,24 @@ func DialWebSocketPath(serverURL, path string, accessKey, secretKey string) (*we
 	urlStr := u.String()
 	var lastErr error
 	for i := 0; i < 10; i++ {
-		conn, _, err := wsDialer.Dial(urlStr, nil)
+		conn, resp, err := wsDialer.Dial(urlStr, nil)
 		if err == nil {
 			return conn, nil
 		}
 		lastErr = err
+		// 非 101 的握手失败（常见于 401/404/走错端口）：重试不会改变结果，应避免指数退避拖死 UI。
+		if errors.Is(err, websocket.ErrBadHandshake) {
+			if resp != nil {
+				return nil, fmt.Errorf(
+					"websocket 握手被拒绝(%s)，请核对地址/端口、路径是否正确；服务端若启用鉴权需填写与该出口一致的 api_key: %w",
+					resp.Status, err,
+				)
+			}
+			return nil, fmt.Errorf(
+				"websocket 握手失败，请核对地址/端口、路径是否正确；服务端若启用鉴权需填写与该出口一致的 api_key: %w",
+				err,
+			)
+		}
 		wait := time.Duration(1<<uint(i)) * time.Second
 		if wait > 60*time.Second {
 			wait = 60 * time.Second

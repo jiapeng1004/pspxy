@@ -29,11 +29,12 @@ api.interceptors.request.use(async (config) => {
   }
 
   const cred = loadAccessCredentials();
-  if (!cred) return config;
+  if (!cred?.apiKey.trim()) return config;
 
   const ts = String(Math.floor(Date.now() / 1000));
-  const sig = await signAccessPayload(cred.accessKey, ts, cred.secretKey);
-  config.headers.set(HDR_AK, cred.accessKey);
+  const akHeader = cred.apiKey.trim();
+  const sig = await signAccessPayload(akHeader, ts, akHeader);
+  config.headers.set(HDR_AK, akHeader);
   config.headers.set(HDR_TS, ts);
   config.headers.set(HDR_SIG, sig);
 
@@ -55,17 +56,14 @@ api.interceptors.response.use(undefined, (error: AxiosError) => {
   return Promise.reject(error);
 });
 
-/** POST /api/v1/auth/login 校验 AK/SK（明文 JSON，不参与后续请求签名通道）。 */
-export async function verifyAccessLogin(
-  accessKey: string,
-  secretKey: string
-): Promise<{ ok: boolean; auth_required: boolean }> {
+/** POST /api/v1/auth/login 校验 api_key（明文 JSON，不参与后续请求签名通道）。 */
+export async function verifyAccessLogin(apiKey: string): Promise<{ ok: boolean; auth_required: boolean }> {
+  const k = apiKey.trim();
   const r = await fetch('/api/v1/auth/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      access_key: accessKey.trim(),
-      secret_key: secretKey.trim(),
+      api_key: k,
     }),
   });
   let data: { ok?: boolean; auth_required?: boolean; message?: string; error?: string } =

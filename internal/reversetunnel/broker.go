@@ -3,6 +3,8 @@ package reversetunnel
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -11,9 +13,11 @@ import (
 )
 
 // Offer 暴露端首条 Text 消息：要桥接的本地 TCP。
+// ChannelID 非空时为客户端请求的隧道 UUID（重连 reclaim）；空则由服务端新发 UUID。
 type Offer struct {
 	LocalHost string `json:"local_host"`
 	LocalPort int    `json:"local_port"`
+	ChannelID string `json:"channel_id,omitempty"`
 }
 
 type attachedMsg struct {
@@ -58,16 +62,29 @@ func (b *Broker) RegisterProvider(agent *websocket.Conn, offer Offer) (_ uuid.UU
 	if offer.LocalHost == "" {
 		offer.LocalHost = "127.0.0.1"
 	}
+	var chID uuid.UUID
+	if s := strings.TrimSpace(offer.ChannelID); s != "" {
+		parsed, err := uuid.Parse(s)
+		if err != nil {
+			return uuid.UUID{}, nil, fmt.Errorf("invalid channel_id")
+		}
+		chID = parsed
+	} else {
+		chID = uuid.New()
+	}
 	ch := &channel{
-		id:       uuid.New(),
+		id:       chID,
 		agent:    agent,
 		offer:    offer,
 		sessions: make(map[uuid.UUID]*websocket.Conn),
 		ackWait:  make(map[uuid.UUID]chan attachResult),
 	}
 	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, exists := b.channels[ch.id]; exists {
+		return uuid.UUID{}, nil, errors.New("channel already active")
+	}
 	b.channels[ch.id] = ch
-	b.mu.Unlock()
 	return ch.id, func() { go b.agentReadLoop(ch) }, nil
 }
 
@@ -181,6 +198,13 @@ func (b *Broker) closeSession(ch *channel, sid uuid.UUID) {
 	_ = ch.agent.WriteMessage(websocket.TextMessage, detach)
 	ch.wsMu.Unlock()
 	_ = ch.agent.SetWriteDeadline(time.Time{})
+}
+
+// ChannelActive 若存在已注册且活跃的暴露端通道则为 true。
+func (b *Broker) ChannelActive(chID uuid.UUID) bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.channels[chID] != nil
 }
 
 // AttachConsumer 建立一条 consumer↔provider 桥接；成功返回后由内部 goroutine 负责 consumer→agent 方向。

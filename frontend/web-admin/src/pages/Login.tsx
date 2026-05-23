@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { Button, Card, Form, Input, Typography, message, Spin } from 'antd';
-import { LockOutlined, UserOutlined } from '@ant-design/icons';
+import { UserOutlined } from '@ant-design/icons';
 import { fetchAuthRequired, verifyAccessLogin } from '../api/client';
 import {
-  saveAccessCredentials,
+  saveUnifiedApiKey,
   loadAccessCredentials,
   clearAccessCredentials,
 } from '../auth/session';
@@ -48,7 +48,7 @@ export default function LoginPage() {
       } catch {
         if (!alive) return;
         setAuthRequired(true);
-        message.warning('无法探测鉴权状态，若服务端已启用 AK/SK 请填写后登录');
+        message.warning('无法探测鉴权状态，若服务端已启用鉴权请填写 api_key 后登录');
       } finally {
         if (alive) setBooting(false);
       }
@@ -60,11 +60,11 @@ export default function LoginPage() {
 
   const [submitting, setSubmitting] = useState(false);
 
-  const onFinish = async (v: { access_key: string; secret_key: string }) => {
+  const onFinish = async (v: { api_key: string }) => {
     setSubmitting(true);
     try {
-      await verifyAccessLogin(v.access_key, v.secret_key);
-      saveAccessCredentials(v.access_key, v.secret_key);
+      await verifyAccessLogin(v.api_key);
+      saveUnifiedApiKey(v.api_key);
       if (loadAccessCredentials()) {
         message.success('登录校验成功');
         navigate(redirectTo, { replace: true });
@@ -93,31 +93,23 @@ export default function LoginPage() {
     <div style={{ maxWidth: 420, margin: '10vh auto', padding: '0 16px' }}>
       <Card title="管理端登录" bordered={false}>
         <Typography.Paragraph type="secondary" style={{ marginBottom: 16 }}>
-          服务端已配置 AK/SK。提交后将调用{' '}
-          <Typography.Text code>POST /api/v1/auth/login</Typography.Text> 校验凭据是否与配置一致；通过后密钥写入
-          sessionStorage，后续 REST 请求将带签名头。
+          服务端已启用鉴权。请填写配置的 <Typography.Text code>api_key</Typography.Text>{' '}
+          中与某一段完全一致的一串密钥；系统将调用{' '}
+          <Typography.Text code>POST /api/v1/auth/login</Typography.Text>{' '}
+          校验。通过后写入 sessionStorage，后续 REST 使用{' '}
+          <Typography.Text code>HEX(SHA1(k+&quot;\n&quot;+ts+&quot;\n&quot;+k))</Typography.Text>
+          {' '}签名。
         </Typography.Paragraph>
         <Form layout="vertical" onFinish={onFinish} requiredMark={false}>
           <Form.Item
-            label="Access Key"
-            name="access_key"
-            rules={[{ required: true, message: '请输入 Access Key' }]}
+            label="API Key"
+            name="api_key"
+            rules={[{ required: true, message: '请输入与服务端任选片段一致的密钥' }]}
           >
             <Input
               prefix={<UserOutlined />}
               autoComplete="username"
-              placeholder="与服务端配置的 access_key 一致"
-            />
-          </Form.Item>
-          <Form.Item
-            label="Secret Key"
-            name="secret_key"
-            rules={[{ required: true, message: '请输入 Secret Key' }]}
-          >
-            <Input.Password
-              prefix={<LockOutlined />}
-              autoComplete="current-password"
-              placeholder="与服务端配置的 secret_key 一致"
+              placeholder="例如 dev-key-one（与 server.auth.api_key 逗号分段之一一致）"
             />
           </Form.Item>
           <Form.Item style={{ marginBottom: 0 }}>

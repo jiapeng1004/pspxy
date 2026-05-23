@@ -1,6 +1,9 @@
 # 管理端访问鉴权（公开 HTTP 接口说明）
 
-服务端在 `server.auth` 中配置了 `access_key` + `secret_key`（均非空）时，REST API 需在请求中带签名请求头或通过登录接口完成凭据校验。
+服务端在 `server.auth` 启用鉴权时（见下），REST/WebSocket 需带签名或由登录接口校验凭据。
+
+**启用条件：** `api_key` 非空——值为逗号分隔的多个密钥片段；任一片段 **k** 可作为 `psp_ak` / `X-Psp-Ak`，签名算法为：  
+`HEX(SHA1(k + "\\n" + unixSec + "\\n" + k))`。
 
 ## `GET /api/v1/auth/enabled`
 
@@ -12,44 +15,33 @@
 { "auth_required": true }
 ```
 
-- `auth_required`: 是否为 `true` 表示服务端已启用 AK/SK（业务请求需签名或已完成登录校验并持有 SK 用于签名）。
+- `auth_required`: `true` 表示已启用上述鉴权（业务请求需要签名或通过登录）。
 
 ---
 
 ## `POST /api/v1/auth/login`
 
-无需事先签名。**用于校验**请求体中的 AK/SK 是否与服务端 `server.auth` 配置一致。
+无需事先签名。用于明文校验凭据是否与配置一致。
 
 **请求**
 
-- `Content-Type: application/json`
+`Content-Type: application/json`
+
+任选服务端 `api_key` 中配置的**一段密钥**填入：
 
 ```json
-{
-  "access_key": "配置的 access_key",
-  "secret_key": "配置的 secret_key"
-}
+{ "api_key": "与 server.auth.api_key 中某一段完全一致" }
 ```
 
 **响应**
 
-- 未启用服务端鉴权时：`200`，且
+- 未启用服务端鉴权：`200`，`{"ok":true,"auth_required":false}`。
+- 已启用且凭据正确：`200`，`{"ok":true,"auth_required":true}`。
+- JSON 无效：`400`。
+- 不匹配：`401`。
 
-```json
-{ "ok": true, "auth_required": false }
-```
-
-- 已启用鉴权且凭据正确：`200`，且
-
-```json
-{ "ok": true, "auth_required": true }
-```
-
-- 缺少字段：`400`，`{"error":"bad_request",...}`
-- AK/SK 不匹配：`401`，`{"error":"unauthorized","message":"凭据无效"}`
-
-后续业务请求须在 Header 中带 `X-Psp-Ak`、`X-Psp-Timestamp`、`X-Psp-Signature`（或由管理端 SPA 自动生成），算法与 WebSocket Query 签名一致：`HEX(SHA1(ak + "\\n" + unixSec + "\\n" + sk))`。
+后续 REST 请求的 Header：`X-Psp-Ak`、`X-Psp-Timestamp`、`X-Psp-Signature`（管理端 SPA 自动生成），算法与 Query `psp_*` 一致。
 
 ---
 
-建议在 **HTTPS** 或可信内网下使用明文登录体；勿将 `secret_key` 写入版本库。
+建议在 **HTTPS** 或可信内网下使用明文登录；勿把完整 `api_key` 列表提交到不信任环境。

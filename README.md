@@ -2,7 +2,7 @@
 
 **Language:** English | **[中文自述](README.zh-CN.md)**
 
-A TCP bridging system over **WebSocket**: run a **[server](cmd/server)** (API + ingress + relay) with an embedded **[admin SPA](frontend/web-admin)**, plus a **[client](cmd/client)** that can operate in **CLI / Web UI**, map **local TCP** to configurable upstream addresses, or run **reverse tunnels** so peers reach your local services via a **`channel_id`**.
+A TCP bridging system over **WebSocket**: run a **[server](cmd/server)** (API + ingress + relay) with an embedded **[admin SPA](frontend/web-admin)**, plus a **[client](cmd/client)** that can operate in **CLI / Web UI**, map **local TCP** to configurable upstream addresses, or run **reverse tunnels** so peers reach your local services via a server-issued **`channel_id`**, using the same **`GET /ws/:tunnel_id`** ingress shape as TCP-registered proxies.
 
 Binary builds and Alpine images are automated in CI; runtime images pull **Aliyun CDN mirrors** for `apk` repositories.
 
@@ -12,8 +12,8 @@ Binary builds and Alpine images are automated in CI; runtime images pull **Aliyu
 
 | Area | Description |
 |------|--------------|
-| **Forward tunnel** | Client listens on `127.0.0.1:<local_port>`; each accepted TCP connects over `GET /ws/:proxy_id` to the server, which opens TCP to `remote_address`. |
-| **Reverse tunnel** | Expose a local TCP through the server: **`/ws/rtunnel/provider`** handshake returns **`channel_id`**; peers use **`/ws/rtunnel/session/:channel_id`** via the consumer CLI (listen locally and bridge). |
+| **Forward tunnel** | Client listens on `127.0.0.1:<local_port>`; each TCP uses `GET /ws/:tunnel_id` where **`tunnel_id` is the admin-registered proxy id**; the server dials **`remote_address`**. |
+| **Reverse tunnel** | **Port provider · outbound**: `GET /ws/rtunnel/provider`, server returns **`channel_id`**. **Consumer** (same ingress semantics): each local inbound TCP connects with **`GET /ws/:tunnel_id`** where **`tunnel_id = channel_id`**. Legacy `GET /ws/rtunnel/session/:channel_id` still works (reverse-only, no TCP-proxy lookup). |
 | **Admin UI** | React SPA embedded in server (proxy CRUD, health, YAML-backed config reload). |
 | **Client UI** | React SPA embedded in client (multiple tunnels, YAML `proxies`, optional AK/SK in browser `sessionStorage`). |
 | **Auth** | Optional server **AK/SK** signatures (REST + WS; query fallback for browsers). |
@@ -120,7 +120,7 @@ sequenceDiagram
     participant Up as upstream TCP<br/>(remote_address)
 
     App->>CT: TCP connect 127.0.0.1:local_port
-    CT->>SRV: WebSocket GET /ws/:proxy_id
+    CT->>SRV: WebSocket GET /ws/:tunnel_id
     SRV->>Up:TCP connect(remote_address)
     loop Bytes
       App<<->>CT: TCP payload
@@ -141,7 +141,7 @@ sequenceDiagram
 
     PV->>SRV: WS /ws/rtunnel/provider (+ offer JSON)
     SRV-->>PV: channel_id (uuid)
-    CS->>SRV: WS /ws/rtunnel/session/:channel_id each inbound TCP conn
+    CS->>SRV: WS GET /ws/:channel_id (per inbound TCP; legacy `/ws/rtunnel/session/:channel_id`)
     SRV->>PV: TEXT attach sid
     PV->>PV: Dial local svc
     PV-->>SRV: TEXT attached OK

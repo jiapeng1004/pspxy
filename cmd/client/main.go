@@ -31,8 +31,7 @@ func main() {
 	rtLocalPort := flag.Int("reverse-local-port", 0, "反向 provider：要暴露的本机 TCP 端口")
 	rtListen := flag.String("reverse-listen", "", "反向 consumer：监听地址，例如 127.0.0.1:19090")
 	rtChannel := flag.String("reverse-channel-id", "", "反向 consumer：provider 下发的 channel UUID")
-	accessKey := flag.String("access-key", "", "服务端 AK（可选，与服务端配置的 Secret 配对）")
-	secretKey := flag.String("secret-key", "", "服务端 SK（可选）")
+	apiKeyFlag := flag.String("api-key", "", "服务端 api_key 中任选一段（签名为 HEX(SHA1(k+\"\\n\"+ts+\"\\n\"+k))），WebSocket Query 与其它客户端保持一致")
 
 	flag.Parse()
 
@@ -43,30 +42,31 @@ func main() {
 		if strings.TrimSpace(*rtChannel) == "" || strings.TrimSpace(*rtListen) == "" {
 			log.Fatal("反向 consumer 模式需要 -reverse-channel-id 与 -reverse-listen（如 127.0.0.1:19090）")
 		}
-		runReverseConsumerMain(*serverURL, *accessKey, *secretKey, *rtListen, *rtChannel)
+		runReverseConsumerMain(*serverURL, strings.TrimSpace(*apiKeyFlag), *rtListen, *rtChannel)
 		return
 	}
 	if *reverseProvider {
 		if *rtLocalPort <= 0 {
 			log.Fatal("反向 provider 模式需要 -reverse-local-port（要暴露的本机端口）")
 		}
-		runReverseProviderMain(*serverURL, *accessKey, *secretKey, *rtLocalHost, *rtLocalPort)
+		runReverseProviderMain(*serverURL, strings.TrimSpace(*apiKeyFlag), *rtLocalHost, *rtLocalPort)
 		return
 	}
 
 	if *localPort > 0 {
-		runHeadless(serverURL, proxyID, localPort, clientCfgPath)
+		runHeadless(serverURL, proxyID, localPort, strings.TrimSpace(*apiKeyFlag), clientCfgPath)
 		return
 	}
 
 	log.Println("客户端 Web 模式（无命令行隧道参数）。脚本/自动化请指定 -local-port 与 -proxy-id。")
 	reg := clienttunnel.NewRegistry()
-	if err := clientui.Run(*uiListen, reg, clientCfgPath); err != nil {
+	rev := clienttunnel.NewReverseManager()
+	if err := clientui.Run(*uiListen, reg, rev, clientCfgPath); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func runHeadless(serverURL *string, proxyID *string, localPort *int, clientCfgPath string) {
+func runHeadless(serverURL *string, proxyID *string, localPort *int, apiKey string, clientCfgPath string) {
 	addr := fmt.Sprintf("127.0.0.1:%d", *localPort)
 
 	reg := clienttunnel.NewRegistry()
@@ -75,6 +75,7 @@ func runHeadless(serverURL *string, proxyID *string, localPort *int, clientCfgPa
 		ServerURL: *serverURL,
 		ProxyID:   *proxyID,
 		LocalPort: *localPort,
+		APIKey:    apiKey,
 	}
 
 	if err := reg.Start(cfg); err != nil {
@@ -96,17 +97,23 @@ func runHeadless(serverURL *string, proxyID *string, localPort *int, clientCfgPa
 	reg.StopAll()
 }
 
-func runReverseProviderMain(serverURL, ak, sk, rtHost string, rtPort int) {
-	id, err := clienttunnel.RunReverseProvider(serverURL, rtHost, rtPort, ak, sk)
+func runReverseProviderMain(serverURL, apiKey string, rtHost string, rtPort int) {
+	ch, ws, err := clienttunnel.HandshakeReverseProvider(serverURL, rtHost, rtPort, apiKey, "")
 	if err != nil {
-		log.Printf("反向 provider 结束 (channel=%s): %v", id, err)
+		log.Fatalf("反向 provider 握手失败: %v", err)
+	}
+	fmt.Println(ch)
+	log.Printf("[reverse-provider] channel_id=%s → 本机服务 %s:%d", ch, rtHost, rtPort)
+	defer func() { _ = ws.Close() }()
+	if err := clienttunnel.ServeReverseProvider(ws, rtHost, rtPort); err != nil {
+		log.Printf("反向 provider 结束 (channel=%s): %v", ch, err)
 	} else {
-		log.Printf("反向 provider 已退出 (channel=%s)", id)
+		log.Printf("反向 provider 已退出 (channel=%s)", ch)
 	}
 }
 
-func runReverseConsumerMain(serverURL, ak, sk, listenAddr, channelID string) {
-	if err := clienttunnel.RunReverseConsumer(listenAddr, serverURL, channelID, ak, sk); err != nil {
+func runReverseConsumerMain(serverURL, apiKey, listenAddr, channelID string) {
+	if err := clienttunnel.RunReverseConsumer(listenAddr, serverURL, channelID, apiKey); err != nil {
 		log.Fatal(err)
 	}
 }

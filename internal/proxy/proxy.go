@@ -18,7 +18,7 @@ const (
 	StatusError   Status = "error"
 )
 
-// ProxyStatus 代理运行时状态（所有隧道经服务端统一 HTTP/WebSocket 端口，路径 /ws/:id）
+// ProxyStatus 代理运行时状态（所有隧道入口统一为服务端端口上的 `GET /ws/:tunnel_id`）
 type ProxyStatus struct {
 	ID            string    `json:"id"`
 	Name          string    `json:"name"`
@@ -58,7 +58,7 @@ func NewTCPServer(cfg config.ProxyConfig) *TCPServer {
 	return s
 }
 
-// WSIngressPath 返回该代理在服务端上的 WebSocket 路径
+// WSIngressPath 返回该 Proxy 在服务端的 ingress 路径（与动态 Reverse 通道共用同源路径格式）
 func WSIngressPath(proxyID string) string {
 	return "/ws/" + proxyID
 }

@@ -6,7 +6,7 @@
 客户端 SHALL 能够连接到服务端的 WebSocket 或 HTTP CONNECT 端点。
 
 #### Scenario: WebSocket 客户端连接
-- **WHEN** 客户端发起 WebSocket 连接到 `ws://server:port/ws/:proxy_id`
+- **WHEN** 客户端发起 WebSocket 连接到 `ws://server:port/ws/:tunnel_id`
 - **THEN** 建立加密或非加密连接
 - **AND** 发送认证信息（如需要）
 - **AND** 进入数据传输模式

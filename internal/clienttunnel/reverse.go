@@ -1,38 +1,47 @@
 package clienttunnel
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"os"
+	"os/signal"
+	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"pspxy/internal/reversetunnel"
 )
 
-// RunReverseProvider 连接服务端反向隧道，把本机 TCP 暴露给其他客户端；
-// 成功协商后 stdout 可用的 channel_id（同时打日志）。
-func RunReverseProvider(serverURL, localHost string, localPort int, accessKey, secretKey string) (channelID string, err error) {
+// HandshakeReverseProvider 与 `/ws/rtunnel/provider` 协商；WebSocket Query 鉴权使用单列 api_key。
+// reuseChannelID 非空时在首包 offer 中带 channel_id，供服务端按该 UUID reclaim；空则由服务端新发。
+func HandshakeReverseProvider(serverURL, localHost string, localPort int, apiKey string, reuseChannelID string) (channelID string, ws *websocket.Conn, err error) {
 	if localHost == "" {
 		localHost = "127.0.0.1"
 	}
-	ws, err := DialWebSocketPath(serverURL, "/ws/rtunnel/provider", accessKey, secretKey)
+	wsConn, err := DialWebSocketPath(serverURL, "/ws/rtunnel/provider", apiKey)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	defer func() { _ = ws.Close() }()
-
 	offer := map[string]any{"local_host": localHost, "local_port": localPort}
-	ob, _ := json.Marshal(offer)
-	if err := ws.WriteMessage(websocket.TextMessage, ob); err != nil {
-		return "", err
+	if cid := strings.TrimSpace(reuseChannelID); cid != "" {
+		offer["channel_id"] = cid
 	}
-	_, data, err := ws.ReadMessage()
+	ob, _ := json.Marshal(offer)
+	if err := wsConn.WriteMessage(websocket.TextMessage, ob); err != nil {
+		_ = wsConn.Close()
+		return "", nil, err
+	}
+	_, data, err := wsConn.ReadMessage()
 	if err != nil {
-		return "", err
+		_ = wsConn.Close()
+		return "", nil, err
 	}
 	var resp struct {
 		OK        bool   `json:"ok"`
@@ -40,26 +49,32 @@ func RunReverseProvider(serverURL, localHost string, localPort int, accessKey, s
 		Error     string `json:"error"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return "", fmt.Errorf("decode response: %w", err)
+		_ = wsConn.Close()
+		return "", nil, fmt.Errorf("decode response: %w", err)
 	}
 	if !resp.OK {
+		_ = wsConn.Close()
 		if resp.Error != "" {
-			return "", fmt.Errorf("%s", resp.Error)
+			return "", nil, fmt.Errorf("%s", resp.Error)
 		}
-		return "", fmt.Errorf("register failed")
+		return "", nil, fmt.Errorf("register failed")
 	}
-	channelID = resp.ChannelID
-	fmt.Println(channelID) // 便于脚本捕获
-	log.Printf("[reverse-provider] channel_id=%s → 本机服务 %s:%d", channelID, localHost, localPort)
+	return resp.ChannelID, wsConn, nil
+}
 
+// ServeReverseProvider 处理 provider 侧消息循环，直到 websocket 关闭或致命错误。
+func ServeReverseProvider(ws *websocket.Conn, localHost string, localPort int) error {
+	if localHost == "" {
+		localHost = "127.0.0.1"
+	}
 	var sessMu sync.Mutex
-	var wsWriteMu sync.Mutex // gorilla 连接禁止并发 WriteMessage
+	var wsWriteMu sync.Mutex
 	tcpBySession := make(map[uuid.UUID]net.Conn)
 
 	for {
 		mt, payload, err := ws.ReadMessage()
 		if err != nil {
-			return channelID, err
+			return err
 		}
 		switch mt {
 		case websocket.TextMessage:
@@ -101,7 +116,7 @@ func RunReverseProvider(serverURL, localHost string, localPort int, accessKey, s
 				werr := ws.WriteMessage(websocket.TextMessage, akb)
 				wsWriteMu.Unlock()
 				if werr != nil {
-					return channelID, werr
+					return werr
 				}
 			}
 		case websocket.BinaryMessage:
@@ -151,40 +166,85 @@ func pumpReverseTCPToWS(ws *websocket.Conn, wsWriteMu *sync.Mutex, tcp net.Conn,
 	}
 }
 
-// RunReverseConsumer 监听本地 TCP，每个入站连接经 WebSocket `/ws/rtunnel/session/:channel_id` 与暴露端服务通信。
-func RunReverseConsumer(listenAddr, serverURL, channelID, accessKey, secretKey string) error {
-	path := fmt.Sprintf("/ws/rtunnel/session/%s", channelID)
+// RunReverseProvider 兼容 CLI：握手后阻塞服务直到连接结束。
+func RunReverseProvider(serverURL, localHost string, localPort int, apiKey string) (channelID string, err error) {
+	channelID, ws, err := HandshakeReverseProvider(serverURL, localHost, localPort, apiKey, "")
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = ws.Close() }()
+	log.Printf("[reverse-provider] channel_id=%s → 本机服务 %s:%d", channelID, localHost, localPort)
+	return channelID, ServeReverseProvider(ws, localHost, localPort)
+}
+
+// RunReverseConsumer 监听本地 TCP，每个入站连接经 WebSocket 与暴露端通信；收到 OS 中断即退出。
+func RunReverseConsumer(listenAddr, serverURL, channelID, apiKey string) error {
+	path := reverseSessionPath(channelID)
 	l, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", listenAddr, err)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		select {
+		case <-sig:
+			cancel()
+			_ = l.Close()
+		case <-ctx.Done():
+		}
+	}()
+
 	defer func() { _ = l.Close() }()
 	log.Printf("[reverse-consumer] 监听 %s → 远端 channel=%s", listenAddr, channelID)
+	return ServeReverseConsumer(ctx, l, serverURL, path, apiKey, nil)
+}
 
+func reverseSessionPath(channelID string) string {
+	return "/ws/" + channelID
+}
+
+// ServeReverseConsumer 在给定 Listener 与 context 下 accept；ctx 取消时关闭 listener 应使 Accept 返回。
+// activeBridges 非 nil 时，每个已成功 accept 的连接在桥接存续期间递增/递减计数（可与 UI 快照对齐）。
+func ServeReverseConsumer(ctx context.Context, l net.Listener, serverURL, sessionPath string, apiKey string, activeBridges *atomic.Int64) error {
 	for {
 		tcpConn, err := l.Accept()
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			return err
 		}
 		go func(c net.Conn) {
-			defer c.Close()
-			raw, err := DialWebSocketPath(serverURL, path, accessKey, secretKey)
-			if err != nil {
-				log.Printf("[reverse-consumer] dial ws: %v", err)
-				return
+			if activeBridges != nil {
+				activeBridges.Add(1)
+				defer activeBridges.Add(-1)
 			}
-			defer raw.Close()
-			remote := &wsConnWrapper{conn: raw}
-			done := make(chan struct{}, 2)
-			go func() {
-				io.Copy(remote, c)
-				done <- struct{}{}
-			}()
-			go func() {
-				io.Copy(c, remote)
-				done <- struct{}{}
-			}()
-			<-done
+			reverseConsumerBridgeTCP(c, serverURL, sessionPath, apiKey)
 		}(tcpConn)
 	}
+}
+
+func reverseConsumerBridgeTCP(c net.Conn, serverURL, sessionPath string, apiKey string) {
+	defer func() { _ = c.Close() }()
+	raw, err := DialWebSocketPath(serverURL, sessionPath, apiKey)
+	if err != nil {
+		log.Printf("[reverse-consumer] dial ws: %v", err)
+		return
+	}
+	defer raw.Close()
+	remote := &wsConnWrapper{conn: raw}
+	done := make(chan struct{}, 2)
+	go func() {
+		_, _ = io.Copy(remote, c)
+		done <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(c, remote)
+		done <- struct{}{}
+	}()
+	<-done
 }

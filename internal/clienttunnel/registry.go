@@ -47,19 +47,17 @@ func NewProxyID() string {
 func PublicFromConfig(c Config) PublicLastConfig {
 	su := NormalizeServerURLForWS(strings.TrimSpace(c.ServerURL))
 	return PublicLastConfig{
-		ServerURL: su,
-		ProxyID:   strings.TrimSpace(c.ProxyID),
-		LocalPort: c.LocalPort,
-		AccessAuthConfigured: strings.TrimSpace(c.AccessKey) != "" &&
-			strings.TrimSpace(c.SecretKey) != "",
+		ServerURL:            su,
+		ProxyID:              strings.TrimSpace(c.ProxyID),
+		LocalPort:            c.LocalPort,
+		AccessAuthConfigured: AuthSecretsConfigured(c.APIKey),
 	}
 }
 
 func (r *Registry) trimCopy(c Config) Config {
 	c.ServerURL = NormalizeServerURLForWS(strings.TrimSpace(c.ServerURL))
 	c.ProxyID = strings.TrimSpace(c.ProxyID)
-	c.AccessKey = strings.TrimSpace(c.AccessKey)
-	c.SecretKey = strings.TrimSpace(c.SecretKey)
+	c.APIKey = strings.TrimSpace(c.APIKey)
 	c.ID = strings.TrimSpace(c.ID)
 	return c
 }
@@ -176,9 +174,87 @@ type ProxyRow struct {
 
 // MultiStatus 多代理聚合状态。
 type MultiStatus struct {
-	Proxies          []ProxyRow `json:"proxies"`
-	ClientConfigFile string     `json:"client_config_file,omitempty"`
-	PersistWarning   string     `json:"persist_warning,omitempty"`
+	Proxies              []ProxyRow           `json:"proxies"`
+	ReverseProviders     []ReverseProviderRow `json:"reverse_providers,omitempty"`
+	ReverseConsumers     []ReverseConsumerRow `json:"reverse_consumers,omitempty"`
+	IssuedReverseChannel string               `json:"issued_reverse_channel,omitempty"`
+	ClientConfigFile     string               `json:"client_config_file,omitempty"`
+	PersistWarning       string               `json:"persist_warning,omitempty"`
+}
+
+// ReverseProviderRow 反向隧道「暴露端」运行态（API / JSON）。
+type ReverseProviderRow struct {
+	ID           string `json:"id"`
+	Running      bool   `json:"running"`
+	Error        string `json:"error,omitempty"`
+	ChannelID    string `json:"channel_id,omitempty"`
+	LocalHost    string `json:"local_host,omitempty"`
+	LocalPort    int    `json:"local_port,omitempty"`
+	ServerURL    string `json:"server_url,omitempty"`
+	AuthHintOnly bool   `json:"access_auth_configured,omitempty"`
+	Enabled      bool   `json:"enabled"`
+}
+
+// ReverseConsumerRow 反向隧道「接入端」运行态。id 即为隧道 UUID。
+type ReverseConsumerRow struct {
+	ID                string `json:"id"`
+	Running           bool   `json:"running"`
+	Error             string `json:"error,omitempty"`
+	Listen            string `json:"listen,omitempty"`
+	ServerURL         string `json:"server_url,omitempty"`
+	AuthHintOnly      bool   `json:"access_auth_configured,omitempty"`
+	ActiveConnections int64  `json:"active_connections,omitempty"`
+	Enabled           bool   `json:"enabled"`
+}
+
+// ReverseProviderPersist 暴露端条目（YAML）。
+// ChannelID 为上次成功挂载后服务端确认的隧道 UUID，下次启用时优先按此 id reclaim；失败时再申请新 UUID 并更新本字段。
+type ReverseProviderPersist struct {
+	ID        string `json:"id" yaml:"id"`
+	ServerURL string `json:"server_url" yaml:"server_url"`
+	LocalHost string `json:"local_host" yaml:"local_host"`
+	LocalPort int    `json:"local_port" yaml:"local_port"`
+	APIKey    string `json:"api_key,omitempty" yaml:"api_key,omitempty"`
+	ChannelID string `json:"channel_id,omitempty" yaml:"channel_id,omitempty"`
+	// Enabled 若为 nil（YAML/API 均未写）：视为启用；设为 false 时进程启动后不自动拉起（仍保留条目写回 YAML）。
+	Enabled *bool `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+}
+
+// EffectiveEnabled 是否视为启用（omit = true）。
+func (p ReverseProviderPersist) EffectiveEnabled() bool {
+	return p.Enabled == nil || *p.Enabled
+}
+
+// ReverseConsumerPersist 接入端条目（YAML）。id 与 GET /ws/{id} 使用同一 UUID。
+// LegacyChannelID 兼容旧字段 channel_id：读入后并入 id 并清空，写盘不再输出。
+type ReverseConsumerPersist struct {
+	ID              string `json:"id" yaml:"id"`
+	Listen          string `json:"listen" yaml:"listen"`
+	ServerURL       string `json:"server_url" yaml:"server_url"`
+	APIKey          string `json:"api_key,omitempty" yaml:"api_key,omitempty"`
+	Enabled         *bool  `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	LegacyChannelID string `json:"channel_id,omitempty" yaml:"channel_id,omitempty"`
+}
+
+// NormalizeReverseConsumerPersist 修剪字段并把历史 channel_id 并入 id。
+func NormalizeReverseConsumerPersist(c ReverseConsumerPersist) ReverseConsumerPersist {
+	c.ServerURL = NormalizeServerURLForWS(strings.TrimSpace(c.ServerURL))
+	c.Listen = strings.TrimSpace(c.Listen)
+	c.APIKey = strings.TrimSpace(c.APIKey)
+	legacy := strings.TrimSpace(c.LegacyChannelID)
+	id := strings.TrimSpace(c.ID)
+	if legacy != "" {
+		c.ID = legacy
+	} else {
+		c.ID = id
+	}
+	c.LegacyChannelID = ""
+	return c
+}
+
+// EffectiveEnabled 是否视为启用（omit = true）。
+func (c ReverseConsumerPersist) EffectiveEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
 }
 
 // Snapshot 聚合全部实例状态。

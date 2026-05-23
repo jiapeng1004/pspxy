@@ -25,14 +25,30 @@ const (
 	maxClockSkew = 5 * time.Minute
 )
 
-// SignAccessPayload 与前端一致的签名：十六进制 HEX(SHA1(ak + "\n" + ts + "\n" + sk))，ts 为 Unix 秒数字符串。
+// SignAccessPayload 单列 api_key：调用方传入同一段 k 两次，签名 hex(SHA1(k + "\n" + unixSec + "\n" + k))。
 func SignAccessPayload(accessKey, unixSec, secretKey string) string {
 	canonical := strings.TrimSpace(accessKey) + "\n" + strings.TrimSpace(unixSec) + "\n" + strings.TrimSpace(secretKey)
 	sum := sha1.Sum([]byte(canonical))
 	return hex.EncodeToString(sum[:])
 }
 
-// VerifyAccessAuth 校验 AK/SK 签名（Header 优先，其次 Query——供浏览器 WebSocket 等无法自定义 Header 的场景）。
+func subtleStringEq(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+func verifySigAgainst(expectHexLower, got string) bool {
+	want := strings.ToLower(strings.TrimSpace(expectHexLower))
+	got = strings.ToLower(strings.TrimSpace(got))
+	if len(want) != len(got) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(want), []byte(got)) == 1
+}
+
+// VerifyAccessAuth 校验单列 api_key 签名（Header 优先，其次 Query）。
 func VerifyAccessAuth(authCfg config.AccessAuth, r *http.Request) error {
 	if !authCfg.Enabled() || r.Method == http.MethodOptions {
 		return nil
@@ -59,12 +75,6 @@ func VerifyAccessAuth(authCfg config.AccessAuth, r *http.Request) error {
 		return fmt.Errorf("缺少鉴权参数（需提供 %s、%s、%s）", hdrAccessKey, hdrTimestamp, hdrSignature)
 	}
 
-	expectAK := strings.TrimSpace(authCfg.AccessKey)
-	expectSK := strings.TrimSpace(authCfg.SecretKey)
-	if subtle.ConstantTimeCompare([]byte(ak), []byte(expectAK)) != 1 {
-		return fmt.Errorf("无效的 Access Key")
-	}
-
 	sec, err := strconv.ParseInt(ts, 10, 64)
 	if err != nil {
 		return fmt.Errorf("无效的时间戳")
@@ -75,36 +85,35 @@ func VerifyAccessAuth(authCfg config.AccessAuth, r *http.Request) error {
 		return fmt.Errorf("时间戳不在允许偏差内（±%v）", maxClockSkew)
 	}
 
-	want := strings.ToLower(SignAccessPayload(expectAK, ts, expectSK))
-	got := strings.ToLower(sig)
-	if len(want) != len(got) {
+	for _, tok := range authCfg.UnifiedTokens() {
+		if !subtleStringEq(ak, tok) {
+			continue
+		}
+		want := SignAccessPayload(tok, ts, tok)
+		if verifySigAgainst(want, sig) {
+			return nil
+		}
 		return fmt.Errorf("签名无效")
 	}
-	if subtle.ConstantTimeCompare([]byte(want), []byte(got)) != 1 {
-		return fmt.Errorf("签名无效")
-	}
-	return nil
+
+	return fmt.Errorf("无效的密钥")
 }
 
-// VerifyPlainLoginCredentials 登录接口校验：服务端已启用 AK/SK 时，比对请求体中的 AK/SK 与配置是否一致。
-func VerifyPlainLoginCredentials(authCfg config.AccessAuth, accessKey, secretKey string) error {
+// VerifyPlainCredential 明文登录：提交的 api_key 须与配置任一片段完全一致。
+func VerifyPlainCredential(authCfg config.AccessAuth, apiKeySubmitted string) error {
 	if !authCfg.Enabled() {
 		return nil
 	}
-	expectAK := strings.TrimSpace(authCfg.AccessKey)
-	expectSK := strings.TrimSpace(authCfg.SecretKey)
-	gotAK := strings.TrimSpace(accessKey)
-	gotSK := strings.TrimSpace(secretKey)
-	if gotAK == "" || gotSK == "" {
+	api := strings.TrimSpace(apiKeySubmitted)
+	if api == "" {
 		return fmt.Errorf("凭据无效")
 	}
-	if subtle.ConstantTimeCompare([]byte(gotAK), []byte(expectAK)) != 1 {
-		return fmt.Errorf("凭据无效")
+	for _, tok := range authCfg.UnifiedTokens() {
+		if subtleStringEq(api, tok) {
+			return nil
+		}
 	}
-	if subtle.ConstantTimeCompare([]byte(gotSK), []byte(expectSK)) != 1 {
-		return fmt.Errorf("凭据无效")
-	}
-	return nil
+	return fmt.Errorf("凭据无效")
 }
 
 // GinAccessAuthMiddleware 对需保护的 HTTP 路由做鉴权；未启用时放行。

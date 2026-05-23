@@ -50,3 +50,4 @@ node_modules/
 .idea/
 *.swp
 .qoder/
+/internal/embed/client/dist/assets/

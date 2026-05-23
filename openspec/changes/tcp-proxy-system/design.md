@@ -17,7 +17,7 @@ graph TB
     subgraph "Server Side"
         S1[Gin Single Port Server] --> S2[Router]
         S2 --> S3[Proxy Manager]
-        S2 --> S4["WebSocket /ws/:proxy_id"]
+        S2 --> S4["WebSocket /ws/:tunnel_id"]
         S3 --> S4
         S4 --> S6[Remote Target TCP]
     end
@@ -95,7 +95,7 @@ PUT    /api/v1/proxies/:id      -> UpdateProxy
 DELETE /api/v1/proxies/:id      -> DeleteProxy
 POST   /api/v1/config/reload    -> ReloadConfig
 GET    /api/v1/health           -> HealthCheck
-WS     /ws/:proxy_id            -> WebSocket Tunnel
+WS     /ws/:tunnel_id         -> Tunnel ingress (TCP-proxy or reverse-consumer)
 ```
 
 **依赖注入**:
@@ -119,8 +119,8 @@ func (h *WSHandler) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
     }
     defer conn.Close()
     
-    proxyID := chi.URLParam(r, "proxy_id")
-    targetConn, err := net.Dial("tcp", h.getTargetAddress(proxyID))
+    tunnelID := chi.URLParam(r, "tunnel_id")
+    targetConn, err := net.Dial("tcp", h.getTargetAddress(tunnelID))
     if err != nil {
         return
     }
