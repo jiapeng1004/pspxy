@@ -134,18 +134,26 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant PV as Reverse provider CLI
+    participant LOC as Local TCP (behind PV)
     participant SRV as Broker (server)
     participant CS as Reverse consumer CLI
     participant LHS as Peer app @ consumer
 
     PV->>SRV: WS /ws/rtunnel/provider (+ offer JSON)
     SRV-->>PV: channel_id (uuid)
-    CS->>SRV: WS /ws/rtunnel/session/:channel_id<br/>(per inbound TCP conn)
+    CS->>SRV: WS /ws/rtunnel/session/:channel_id each inbound TCP conn
     SRV->>PV: TEXT attach sid
-    PV->>PV: Dial local_service
+    PV->>PV: Dial local svc
     PV-->>SRV: TEXT attached OK
-    loop Multiplex sessions
-      LHS<<->>CS<<->>SRV<<->>PV<<->>local_service
+    loop Data path (symmetric reverse)
+      LHS->>CS: TCP
+      CS->>SRV: WebSocket frames
+      SRV->>PV: multiplex WS
+      PV->>LOC: TCP
+      LOC->>PV: TCP reply
+      PV->>SRV: WebSocket
+      SRV->>CS: WebSocket reply
+      CS->>LHS: TCP reply
     end
 ```
 

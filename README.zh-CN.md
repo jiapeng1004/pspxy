@@ -134,18 +134,26 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant PV as 反向 provider CLI
+    participant LOC as PV 后方本机 TCP
     participant SRV as Broker（服务端）
     participant CS as 反向 consumer CLI
     participant LHS as consumer 侧应用
 
     PV->>SRV: WS /ws/rtunnel/provider（offer JSON）
     SRV-->>PV: channel_id (uuid)
-    CS->>SRV: WS /ws/rtunnel/session/:channel_id<br/>（每个入站 TCP 一条）
+    CS->>SRV: WS /ws/rtunnel/session/:channel_id（每入站 TCP 一条 WS）
     SRV->>PV: TEXT attach sid
-    PV->>PV: Dial 本机服务
+    PV->>PV: Dial 本机端口
     PV-->>SRV: TEXT attached OK
-    loop 多会话
-      LHS<<->>CS<<->>SRV<<->>PV<<->>本机服务
+    loop 数据路径双向对称中继
+      LHS->>CS: TCP
+      CS->>SRV: WebSocket 二进制
+      SRV->>PV: 多路复用 WS
+      PV->>LOC: TCP
+      LOC->>PV: TCP 响应
+      PV->>SRV: WebSocket
+      SRV->>CS: WebSocket 响应
+      CS->>LHS: TCP 响应
     end
 ```
 
