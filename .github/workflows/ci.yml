@@ -220,7 +220,6 @@ jobs:
   # -------------------- Tag：客户端 + 服务端 linux x64 二进制发布到 GitHub Releases --------------------
   release-client-binaries:
     name: Publish binaries to GitHub Releases
-    if: github.ref_type == 'tag'
     needs: [client-binaries, docker-server]
     runs-on: ubuntu-latest
     permissions:
