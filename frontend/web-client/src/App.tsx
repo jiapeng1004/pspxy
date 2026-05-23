@@ -61,7 +61,7 @@ export default function App() {
           {nav === 'forward' ? '隧道穿透（订阅）' : '出站暴露（把本机端口挂到服务端）'}
         </Typography.Title>
 
-        <div style={{ maxWidth: 1160 }}>
+        <div style={{ width: '100%', minWidth: 0 }}>
           {nav === 'forward' ? (
             <ForwardTunnelPanel status={status} onReplaceStatus={(s) => setStatus(s)} />
           ) : (

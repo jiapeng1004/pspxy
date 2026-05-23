@@ -21,6 +21,7 @@ import {
   ThunderboltOutlined,
   DeleteOutlined,
   SafetyCertificateOutlined,
+  CopyOutlined,
 } from '@ant-design/icons';
 import type {
   TunnelConfig,
@@ -141,6 +142,17 @@ function listenLabel(r: TunnelSubscribeRow): string {
 
 function tunnelIdLabel(r: TunnelSubscribeRow): string {
   return r.backend === 'proxy' ? r.row.last_config.proxy_id : r.row.id;
+}
+
+async function copyTunnelId(uuid: string) {
+  const t = String(uuid ?? '').trim();
+  if (!t) return;
+  try {
+    await navigator.clipboard.writeText(t);
+    message.success('已复制隧道 ID');
+  } catch {
+    message.error('复制失败');
+  }
 }
 
 /** 隧道穿透页：只对「订阅方」暴露统一语义 */
@@ -534,12 +546,22 @@ export default function ForwardTunnelPanel({ status, onReplaceStatus }: ForwardT
     },
     {
       title: '隧道 ID',
-      ellipsis: true,
-      render: (_, entry) => (
-        <Typography.Text code ellipsis={{ tooltip: tunnelIdLabel(entry) }}>
-          {tunnelIdLabel(entry)}
-        </Typography.Text>
-      ),
+      minWidth: 300,
+      render: (_, entry) => {
+        const tid = tunnelIdLabel(entry);
+        return (
+          <Space wrap={false}>
+            <Typography.Text
+              code
+              ellipsis={{ tooltip: tid }}
+              style={{ maxWidth: 'min(720px, 58vw)' }}
+            >
+              {tid}
+            </Typography.Text>
+            <Button type="link" size="small" icon={<CopyOutlined />} onClick={() => void copyTunnelId(tid)} />
+          </Space>
+        );
+      },
     },
     {
       title: '启用',
@@ -638,6 +660,8 @@ export default function ForwardTunnelPanel({ status, onReplaceStatus }: ForwardT
       </Typography.Paragraph>
 
       <Card
+        bodyStyle={{ overflowX: 'auto' }}
+        style={{ width: '100%', maxWidth: '100%' }}
         title="隧道订阅"
         extra={
           <Space wrap>
